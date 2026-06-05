@@ -424,6 +424,109 @@
         .no-wrap {
             white-space: nowrap;
         }
+
+        /* Navigation Tabs */
+        .nav-tabs {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 25px;
+            background: rgba(255, 255, 255, 0.03);
+            padding: 8px;
+            border-radius: 14px;
+            border: 1px solid var(--border-color);
+            width: fit-content;
+        }
+
+        .nav-tab {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 20px;
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-weight: 600;
+            border-radius: 10px;
+            transition: all 0.2s ease;
+        }
+
+        .nav-tab:hover {
+            color: var(--text-color);
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .nav-tab.active {
+            color: var(--text-color);
+            background: var(--primary-color);
+            box-shadow: 0 4px 15px rgba(108, 92, 231, 0.3);
+        }
+
+        /* Modal Style for screenshots */
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            overflow: auto;
+            background-color: rgba(0,0,0,0.85);
+            backdrop-filter: blur(8px);
+        }
+        .modal-content {
+            background-color: #1a1d26;
+            margin: 5% auto;
+            padding: 20px;
+            border: 1px solid var(--border-color);
+            width: 80%;
+            max-width: 900px;
+            border-radius: 20px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.5);
+            position: relative;
+            animation: modalFadeIn 0.3s ease;
+        }
+        @keyframes modalFadeIn {
+            from {transform: scale(0.9); opacity: 0;}
+            to {transform: scale(1); opacity: 1;}
+        }
+        .close-btn {
+            position: absolute;
+            right: 20px;
+            top: 15px;
+            color: var(--text-secondary);
+            font-size: 28px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: color 0.2s;
+        }
+        .close-btn:hover {
+            color: var(--danger-color);
+        }
+        .modal-img {
+            width: 100%;
+            height: auto;
+            border-radius: 10px;
+            margin-top: 15px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+        
+        .btn-screenshot {
+            background: rgba(108, 92, 231, 0.15);
+            border: 1px solid var(--primary-color);
+            color: var(--text-color);
+            padding: 5px 10px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            transition: background 0.2s, transform 0.2s;
+        }
+        .btn-screenshot:hover {
+            background: var(--primary-color);
+            transform: scale(1.05);
+        }
     </style>
 </head>
 <body>
@@ -448,6 +551,12 @@
                 <button id="btn-scan" onclick="triggerScan()"><i class="fa-solid fa-rotate"></i> Scan Now</button>
             </div>
         </header>
+
+        <!-- Navigation Tabs -->
+        <nav class="nav-tabs" style="grid-column: 1 / -1; margin-bottom: 20px;">
+            <a href="/" class="nav-tab active"><i class="fa-solid fa-gauge"></i> Live Dashboard</a>
+            <a href="/backtest" class="nav-tab"><i class="fa-solid fa-vial"></i> Strategy Backtester</a>
+        </nav>
 
         <!-- Main Column (Left) -->
         <main>
@@ -520,6 +629,7 @@
                                 <th>Entry / Exit</th>
                                 <th>Profit</th>
                                 <th>Decision Factor / Comment</th>
+                                <th>Chart</th>
                             </tr>
                         </thead>
                         <tbody id="history-tbody">
@@ -619,6 +729,26 @@
                 </div>
 
                 <div class="form-group">
+                    <div class="checkbox-container">
+                        <input type="checkbox" id="gann-enabled-toggle">
+                        <label for="gann-enabled-toggle" style="margin-bottom: 0; cursor: pointer; font-weight: bold; color: #f1c40f;">Enable W.D. Gann Strategy</label>
+                    </div>
+                </div>
+
+                <!-- Collapsible Gann Settings -->
+                <div id="gann-settings-section" style="border-left: 2px dashed #f1c40f; padding-left: 15px; margin-bottom: 20px; display: none;">
+                    <div class="form-group" style="margin-bottom: 10px;">
+                        <label for="gann-lookback">Gann Lookback (candles)</label>
+                        <input type="number" id="gann-lookback" min="20" max="500" step="5" value="100">
+                    </div>
+                    <div class="form-group" style="margin-bottom: 10px;">
+                        <label>Gann Geometry</label>
+                        <input type="text" value="Auto-Detected (Market-Driven)" disabled style="background-color: rgba(255,255,255,0.01); color: #f1c40f; border: 1px dashed var(--border-color); cursor: not-allowed; font-weight: 600;">
+                        <input type="hidden" id="gann-geometry" value="dynamic">
+                    </div>
+                </div>
+
+                <div class="form-group">
                     <label for="strategy-prompt">AI Strategy Prompt (System Instructions)</label>
                     <textarea id="strategy-prompt" placeholder="Write system prompt instructions here..."></textarea>
                 </div>
@@ -648,6 +778,23 @@
 
     <script>
         let balanceChart = null;
+
+        // Screenshot Modal Functions
+        function showScreenshot(url, title) {
+            document.getElementById('modal-image').src = url;
+            document.getElementById('modal-title').innerText = title;
+            document.getElementById('screenshot-modal').style.display = 'block';
+        }
+        function closeScreenshotModal() {
+            document.getElementById('screenshot-modal').style.display = 'none';
+        }
+        // Close modal when clicking outside of it
+        window.onclick = function(event) {
+            const modal = document.getElementById('screenshot-modal');
+            if (event.target === modal) {
+                modal.style.display = 'none';
+            }
+        }
 
         // Initialize and setup chart
         function initChart(chartData) {
@@ -827,7 +974,7 @@
                 if (data.history.length === 0) {
                     histTbody.innerHTML = `
                         <tr>
-                            <td colspan="8">
+                            <td colspan="9">
                                 <div class="empty-state">
                                     <i class="fa-solid fa-history"></i>
                                     <span>No completed trades logged yet</span>
@@ -840,6 +987,11 @@
                         const profClass = t.profit >= 0 ? 'profit-pos' : 'profit-neg';
                         const profSign = t.profit >= 0 ? '+' : '';
                         const dateFormatted = t.open_time.split(' ').length > 1 ? t.open_time.split(' ')[1] : t.open_time;
+                        
+                        const screenshotButton = t.screenshot_url 
+                            ? `<button class="btn-screenshot" onclick="showScreenshot('${t.screenshot_url}', '${t.symbol} Trade #${t.ticket}')"><i class="fa-solid fa-camera"></i> View Chart</button>`
+                            : `<span style="color: var(--text-secondary); font-size: 0.8rem;">N/A</span>`;
+
                         histTbody.innerHTML += `
                             <tr>
                                 <td class="no-wrap" style="font-size: 0.8rem; color: var(--text-secondary);">${t.open_time}</td>
@@ -852,6 +1004,7 @@
                                 </td>
                                 <td><span class="${profClass}">${profSign}$${t.profit.toFixed(2)}</span></td>
                                 <td style="font-size: 0.85rem; color: var(--text-secondary);">${t.reason}</td>
+                                <td>${screenshotButton}</td>
                             </tr>
                         `;
                     });
@@ -959,6 +1112,13 @@
                 document.getElementById('grid-sl').value = settings.grid_sl || 20.0;
                 document.getElementById('grid-tp').value = settings.grid_tp || 20.0;
 
+                // Load Gann settings
+                const gannEnabled = settings.gann_enabled === 1;
+                document.getElementById('gann-enabled-toggle').checked = gannEnabled;
+                document.getElementById('gann-settings-section').style.display = gannEnabled ? 'block' : 'none';
+                document.getElementById('gann-lookback').value = settings.gann_lookback || 100;
+                document.getElementById('gann-geometry').value = settings.gann_geometry || 'square';
+
                 document.getElementById('strategy-prompt').value = settings.strategy_prompt;
             } catch (err) {
                 console.error("Error loading settings:", err);
@@ -986,6 +1146,11 @@
                 grid_target_profit: parseFloat(document.getElementById('grid-target-profit').value),
                 grid_sl: parseFloat(document.getElementById('grid-sl').value),
                 grid_tp: parseFloat(document.getElementById('grid-tp').value),
+                
+                // Save Gann settings
+                gann_enabled: document.getElementById('gann-enabled-toggle').checked ? 1 : 0,
+                gann_lookback: parseInt(document.getElementById('gann-lookback').value),
+                gann_geometry: document.getElementById('gann-geometry').value,
                 
                 strategy_prompt: document.getElementById('strategy-prompt').value
             };
@@ -1040,6 +1205,11 @@
                 document.getElementById('grid-settings-section').style.display = this.checked ? 'block' : 'none';
             });
 
+            // Setup Gann toggle event listener
+            document.getElementById('gann-enabled-toggle').addEventListener('change', function() {
+                document.getElementById('gann-settings-section').style.display = this.checked ? 'block' : 'none';
+            });
+
             // Refresh status metrics every 5 seconds
             setInterval(fetchStatus, 5000);
             
@@ -1047,5 +1217,14 @@
             setInterval(fetchChartData, 60000);
         });
     </script>
+    <!-- Screenshot Modal -->
+    <div id="screenshot-modal" class="modal">
+        <div class="modal-content">
+            <span class="close-btn" onclick="closeScreenshotModal()">&times;</span>
+            <h2 id="modal-title" style="border-bottom: 1px solid var(--border-color); padding-bottom: 10px; margin-top: 0;">Trade Chart Setup</h2>
+            <img id="modal-image" class="modal-img" src="" alt="Trade Chart Screenshot">
+        </div>
+    </div>
+
 </body>
 </html>

@@ -37,6 +37,30 @@ Your role is to analyze market data for EURUSDm and make precise BUY or SELL dec
 - If any rule is not met, do not trade. Output "HOLD - [reason for no trade]" and explain which rule failed.
 """
 
+# Gann & Fibonacci Breakout strategy prompt
+DEFAULT_GANN_STRATEGY = """You are an expert quantitative Forex/Crypto trader specializing in W.D. Gann Price Angles (Square of 9) combined with a Fibonacci Pivot Breakout strategy on M30.
+Your role is to analyze current market data and make precise BUY or SELL decisions using a strict rule-based framework.
+
+## STRATEGY SYSTEM RULES:
+1. **Pivot Breakout Trigger:**
+   - For BUY: The price must break and close ABOVE the intermediate high (High B) of a validated A-B-C pivot correction structure.
+   - For SELL: The price must break and close BELOW the intermediate low (Low B) of a validated A-B-C pivot correction structure.
+2. **Fibonacci Retracement Check:**
+   - The correction pivot C must be between 50% and 75% of the preceding move A-B.
+3. **Projected Target Prices (Gann Levels):**
+   - The Target Profit (TP) must be set at the first Gann Price Angle level above High B (for BUY) or below Low B (for SELL).
+4. **Stop Loss (SL) Level:**
+   - The Stop Loss must be placed exactly at the correction pivot C.
+
+## RISK MANAGEMENT RULES:
+1. **Stop Loss (SL) is MANDATORY** - Never open a trade without a Stop Loss.
+2. **Volume:** Sizing will be calculated automatically by the bot based on your SL price. Do not calculate manually.
+
+## EXECUTION RULES:
+- If a valid breakout trigger is active and verified, call `open_trade` immediately with the exact TP and SL levels.
+- If no setup is active, output "HOLD" and explain the current market state.
+"""
+
 def get_db_connection():
     """Create a database connection."""
     conn = sqlite3.connect(DB_FILE, timeout=30.0)
@@ -76,6 +100,20 @@ def init_db():
     )
     """)
 
+    # Upgrade: Add gann_data column if it doesn't exist
+    try:
+        cursor.execute("SELECT gann_data FROM trades LIMIT 1")
+    except sqlite3.OperationalError:
+        cursor.execute("ALTER TABLE trades ADD COLUMN gann_data TEXT")
+        conn.commit()
+
+    # Upgrade: Add screenshot_url column if it doesn't exist
+    try:
+        cursor.execute("SELECT screenshot_url FROM trades LIMIT 1")
+    except sqlite3.OperationalError:
+        cursor.execute("ALTER TABLE trades ADD COLUMN screenshot_url TEXT")
+        conn.commit()
+
     # 3. Balance Log Table
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS balance_log (
@@ -90,7 +128,7 @@ def init_db():
 
     # -- Insert default settings if they don't exist --
     defaults = {
-        "strategy_prompt": DEFAULT_STRATEGY,
+        "strategy_prompt": DEFAULT_GANN_STRATEGY,
         "symbols": json.dumps(["EURUSDm"]),
         "risk_percent": "3.0",
         "max_positions": "2",
@@ -103,7 +141,10 @@ def init_db():
         "grid_max_legs": "4",
         "grid_target_profit": "2.0",
         "grid_sl": "20.0",
-        "grid_tp": "20.0"
+        "grid_tp": "20.0",
+        "gann_enabled": "1",
+        "gann_lookback": "100",
+        "gann_geometry": "square"
     }
 
     for key, val in defaults.items():
@@ -166,17 +207,19 @@ def save_settings(settings_dict):
 #  Trades Accessors
 # ============================================================
 
-def log_trade_open(ticket, symbol, action, volume, entry_price, sl, tp, reason):
+def log_trade_open(ticket, symbol, action, volume, entry_price, sl, tp, reason, gann_data=None):
     """Record a newly opened trade in the database."""
     conn = get_db_connection()
     cursor = conn.cursor()
     open_time = time.strftime('%Y-%m-%d %H:%M:%S')
     
+    gann_str = json.dumps(gann_data) if gann_data else None
+    
     cursor.execute("""
     INSERT OR REPLACE INTO trades 
-    (ticket, symbol, action, volume, entry_price, sl, tp, reason, open_time, status, profit, close_price, close_time) 
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.0, 0.0, '')
-    """, (ticket, symbol, action.upper(), volume, entry_price, sl, tp, reason, open_time, 'OPEN'))
+    (ticket, symbol, action, volume, entry_price, sl, tp, reason, open_time, status, profit, close_price, close_time, gann_data) 
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.0, 0.0, '', ?)
+    """, (ticket, symbol, action.upper(), volume, entry_price, sl, tp, reason, open_time, 'OPEN', gann_str))
     
     conn.commit()
     conn.close()
@@ -194,6 +237,15 @@ def log_trade_close(ticket, close_price, profit):
     WHERE ticket = ?
     """, (close_price, profit, close_time, ticket))
     
+    conn.commit()
+    conn.close()
+
+
+def update_trade_screenshot(ticket, screenshot_url):
+    """Save the screenshot path for a specific trade."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE trades SET screenshot_url = ? WHERE ticket = ?", (screenshot_url, ticket))
     conn.commit()
     conn.close()
 

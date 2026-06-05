@@ -25,6 +25,7 @@ from db_manager import (
     get_active_trades, 
     log_balance_snapshot
 )
+from gann_helper import detect_market_structure, calculate_gann_levels
 
 # Load configuration
 load_dotenv()
@@ -160,9 +161,14 @@ def manage_active_positions_grid():
             continue
             
         point = symbol_info.point
-        is_jpy = symbol.upper().endswith("JPY") or "JPY" in symbol.upper()
-        pip_size = 0.01 if is_jpy else 0.0001
-        pip_multiplier = 100.0 if is_jpy else 10000.0
+        contract_size = symbol_info.trade_contract_size
+        if contract_size < 1000.0:
+            pip_size = (0.01 * current_price) / 10.0
+            pip_multiplier = 1.0 / pip_size
+        else:
+            is_jpy = symbol.upper().endswith("JPY") or "JPY" in symbol.upper()
+            pip_size = 0.01 if is_jpy else 0.0001
+            pip_multiplier = 100.0 if is_jpy else 10000.0
         
         # Find drawdown from the last opened leg
         last_leg = pos_list[-1]
@@ -227,7 +233,13 @@ def manage_active_positions_grid():
                 tp_price = weighted_entry + (target_profit * pip_size) if basket_type == 'BUY' else weighted_entry - (target_profit * pip_size)
                 
             last_entry_price = pos_list[-1].price_open
-            sl_price = last_entry_price - (grid_sl * pip_size) if basket_type == 'BUY' else last_entry_price + (grid_sl * pip_size)
+            is_gann_trade = any("gann" in (pos.comment or "").lower() for pos in pos_list)
+            
+            if is_gann_trade and pos_list[0].sl > 0:
+                sl_price = pos_list[0].sl
+                print(f"[GRID INFO] Gann trade detected. Preserving oldest SL price: {sl_price}")
+            else:
+                sl_price = last_entry_price - (grid_sl * pip_size) if basket_type == 'BUY' else last_entry_price + (grid_sl * pip_size)
             
             digits = symbol_info.digits
             tp_price = round(tp_price, digits)
@@ -326,13 +338,19 @@ def check_and_execute_trading_cycle():
             print(f"[ERROR] Could not fetch price for {symbol}. Skipping.")
             continue
 
-        # Fetch recent 20 candles for technical context
+        # Fetch candles based on lookback
+        gann_enabled = int(settings.get("gann_enabled", 1)) == 1
+        gann_lookback = int(settings.get("gann_lookback", 100))
+        gann_geometry = settings.get("gann_geometry", "square")
+
         tf_constant = get_timeframe(DEFAULT_TIMEFRAME)
         if tf_constant is None:
             print(f"[ERROR] Invalid timeframe configuration: {DEFAULT_TIMEFRAME}")
             continue
 
-        candles_df = get_candles(symbol=symbol, timeframe=tf_constant, count=20)
+        # Fetch count
+        count_to_fetch = max(50, gann_lookback + 10)
+        candles_df = get_candles(symbol=symbol, timeframe=tf_constant, count=count_to_fetch)
         if candles_df is None or len(candles_df) < 10:
             print(f"[ERROR] Not enough candle data for {symbol}. Skipping.")
             continue
@@ -340,13 +358,44 @@ def check_and_execute_trading_cycle():
         # Format candles for the AI model
         candles_text = format_candles_for_ai(candles_df, last_n=20)
 
+        # Detect market structure setup
+        gann_context = None
+        if gann_enabled:
+            setup = detect_market_structure(candles_df, lookback=gann_lookback)
+            if not setup:
+                print(f"[INFO] No valid Gann + Fibonacci structure detected on {symbol}. Skipping analysis.")
+                continue
+
+            # Retracement percentage
+            if setup["type"] == "BUY":
+                retr_pct = ((setup["B"] - setup["C"]) / (setup["B"] - setup["A"])) * 100.0
+            else:
+                retr_pct = ((setup["C"] - setup["B"]) / (setup["A"] - setup["B"])) * 100.0
+
+            from gann_helper import detect_dynamic_gann_levels
+            dyn = detect_dynamic_gann_levels(setup["A"], setup["B"], mode='bullish' if setup["type"] == 'BUY' else 'bearish')
+
+            gann_context = {
+                "type": setup["type"],
+                "A": setup["A"],
+                "B": setup["B"],
+                "C": setup["C"],
+                "retracement_pct": retr_pct,
+                "entry_angle": dyn["entry_angle"],
+                "target_angle": dyn["target_angle"],
+                "target_price": dyn["target_price"],
+                "sl_price": dyn["sl_price"]
+            }
+            print(f"[GANN SETUP] Valid {setup['type']} structure: A={setup['A']}, B={setup['B']}, C={setup['C']} (Retracement: {retr_pct:.1f}%)")
+
         # Run AI analysis
         ai_result = engine.analyze_market(
             symbol=symbol,
             timeframe=DEFAULT_TIMEFRAME,
             candles_data=candles_text,
             account_info=account_info,
-            current_price=price_info
+            current_price=price_info,
+            gann_context=gann_context
         )
 
         decision = ai_result.get("decision", "HOLD")
@@ -356,14 +405,17 @@ def check_and_execute_trading_cycle():
         if decision in ["BUY", "SELL"] and trade_params:
             print(f"\n🎯 [AI SIGNAL] Triggered {decision} on {symbol}")
             
-            # --- DYNAMIC GRID PARAMETERS OVERRIDE ---
-            grid_enabled = int(settings.get("grid_enabled", 1)) == 1
-            if grid_enabled:
+            reason = trade_params.get("reason", "AI Strategy Entry")
+            if grid_enabled and not gann_enabled:
                 grid_sl = float(settings.get("grid_sl", 20.0))
                 grid_tp = float(settings.get("grid_tp", 20.0))
                 symbol_info = mt5.symbol_info(symbol)
-                pip_size = 0.01 if (symbol.upper().endswith("JPY") or "JPY" in symbol.upper()) else 0.0001
                 entry_price = price_info['ask'] if decision == "BUY" else price_info['bid']
+                contract_size = symbol_info.trade_contract_size if symbol_info else 100000.0
+                if contract_size < 1000.0:
+                    pip_size = (0.01 * entry_price) / 10.0
+                else:
+                    pip_size = 0.01 if (symbol.upper().endswith("JPY") or "JPY" in symbol.upper()) else 0.0001
                 
                 # Override SL and TP from database settings
                 sl = entry_price - (grid_sl * pip_size) if decision == "BUY" else entry_price + (grid_sl * pip_size)
@@ -372,11 +424,19 @@ def check_and_execute_trading_cycle():
                 sl = round(sl, symbol_info.digits)
                 tp = round(tp, symbol_info.digits)
                 print(f"[GRID OVERRIDE] Enforcing grid parameters. SL: {sl} ({grid_sl} pips), TP: {tp} ({grid_tp} pips)")
+            elif gann_enabled and 'dyn' in locals() and dyn:
+                sl = dyn["sl_price"]
+                tp = dyn["target_price"]
+                symbol_info = mt5.symbol_info(symbol)
+                if symbol_info:
+                    sl = round(sl, symbol_info.digits)
+                    tp = round(tp, symbol_info.digits)
+                print(f"[GANN OVERRIDE] Enforcing dynamic Gann parameters. SL: {sl} (Angle 0° / A), TP: {tp} (Target Angle: {dyn['target_angle']}°)")
+                reason = "Gann: " + reason
             else:
                 sl = float(trade_params.get("sl", 0.0))
                 tp = float(trade_params.get("tp", 0.0))
                 
-            reason = trade_params.get("reason", "AI Strategy Entry")
             entry_price = price_info['ask'] if decision == "BUY" else price_info['bid']
             
             if sl <= 0:
@@ -392,7 +452,7 @@ def check_and_execute_trading_cycle():
                 continue
                 
             rr_ratio = tp_distance / sl_distance
-            min_rr_ratio = float(settings.get("min_rr_ratio", 1.5))
+            min_rr_ratio = float(settings.get("min_rr_ratio", 1.0) if gann_enabled else settings.get("min_rr_ratio", 1.5))
             if rr_ratio < min_rr_ratio:
                 print(f"[REJECT] Trade rejected: Risk/Reward ratio is 1:{rr_ratio:.2f} (must be at least 1:{min_rr_ratio:.2f})")
                 continue
@@ -428,9 +488,28 @@ def check_and_execute_trading_cycle():
                     entry_price=trade_res["price"],
                     sl=sl,
                     tp=tp,
-                    reason=reason
+                    reason=reason,
+                    gann_data=gann_context
                 )
                 print(f"[DB] Trade ticket {trade_res['ticket']} logged successfully in SQLite.")
+                
+                # Generate and save chart screenshot
+                try:
+                    from chart_generator import generate_chart_screenshot
+                    from db_manager import update_trade_screenshot
+                    
+                    screenshot_url = generate_chart_screenshot(
+                        symbol=symbol,
+                        ticket=trade_res["ticket"],
+                        entry_price=trade_res["price"],
+                        sl_price=sl,
+                        tp_price=tp,
+                        gann_data=gann_context
+                    )
+                    update_trade_screenshot(trade_res["ticket"], screenshot_url)
+                    print(f"[SCREENSHOT] Saved trade chart to {screenshot_url}")
+                except Exception as ex:
+                    print(f"[SCREENSHOT] [ERROR] Failed to save screenshot: {ex}")
         else:
             print(f"\n➡️ [AI DECISION] {decision}")
             print(f"  Reasoning: {ai_result.get('analysis', '')[:300]}")

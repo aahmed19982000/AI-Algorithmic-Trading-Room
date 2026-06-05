@@ -149,7 +149,7 @@ class AITradingEngine:
         self.model_name = model_name
         print(f"[OK] AI Engine initialized (model: {model_name})")
 
-    def analyze_market(self, symbol, timeframe, candles_data, account_info, current_price):
+    def analyze_market(self, symbol, timeframe, candles_data, account_info, current_price, gann_context=None):
         """
         Send market data to Gemini and get a trading decision.
 
@@ -159,6 +159,7 @@ class AITradingEngine:
             candles_data:  String of recent OHLCV data
             account_info:  Dict with balance, equity, etc.
             current_price: Dict with bid, ask, spread
+            gann_context:  Optional dict with calculated Gann angles & Fibonacci pivot structure
 
         Returns:
             dict: {
@@ -169,7 +170,7 @@ class AITradingEngine:
             }
         """
         # Build the prompt with market data
-        prompt = self._build_prompt(symbol, timeframe, candles_data, account_info, current_price)
+        prompt = self._build_prompt(symbol, timeframe, candles_data, account_info, current_price, gann_context)
 
         print(f"\n[AI] Analyzing {symbol} {timeframe}...")
         print(f"[AI] Sending to {self.model_name}...")
@@ -186,7 +187,7 @@ class AITradingEngine:
                 "raw_response": None
             }
 
-    def _build_prompt(self, symbol, timeframe, candles_data, account_info, current_price):
+    def _build_prompt(self, symbol, timeframe, candles_data, account_info, current_price, gann_context=None):
         """Build the market analysis prompt."""
         prompt = f"""
 ## MARKET DATA FOR ANALYSIS
@@ -205,7 +206,31 @@ class AITradingEngine:
 - Equity: {account_info.get('equity', 'N/A')} {account_info.get('currency', 'USD')}
 - Free Margin: {account_info.get('margin_free', 'N/A')} {account_info.get('currency', 'USD')}
 - Leverage: 1:{account_info.get('leverage', 'N/A')}
+"""
+        if gann_context:
+            prompt += f"""
+### W.D. GANN & FIBONACCI ANALYSIS
+We detected a market structure setup on M30:
+- **Setup Type:** {gann_context.get('type')} Setup
+- **Base Pivot (A):** {gann_context.get('A')} (Starting point for Gann Angles, 0° angle)
+- **Breakout Trigger (B):** {gann_context.get('B')}
+- **Correction Pivot (C):** {gann_context.get('C')}
+- **Fibonacci Retracement:** {gann_context.get('retracement_pct'):.1f}% (Confirmed between 50% and 75%)
 
+Dynamically Calculated Gann Levels relative to base pivot A:
+- **Detected Entry Angle:** {gann_context.get('entry_angle')}° (closest to breakout trigger B)
+- **Dynamic Target Angle:** {gann_context.get('target_angle')}° (double the entry angle)
+- **Target Price (TP):** {gann_context.get('target_price'):.5f}
+- **Stop Loss Price (SL):** {gann_context.get('sl_price'):.5f} (set at 0° angle / pivot A)
+
+Use these levels to determine your breakout entry and exit. 
+If the current price breaks and closes beyond B:
+- Entry Price: {current_price.get('ask') if gann_context.get('type') == 'BUY' else current_price.get('bid')}
+- Target Profit (TP): {gann_context.get('target_price'):.5f}
+- Stop Loss (SL): {gann_context.get('sl_price'):.5f}
+"""
+
+        prompt += f"""
 ### Recent Candles (newest last):
 {candles_data}
 

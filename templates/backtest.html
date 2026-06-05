@@ -1,0 +1,1150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gann Strategy Backtester | AI Algorithmic Trading Room</title>
+    
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
+    
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <style>
+        :root {
+            --bg-color: #0b0c10;
+            --surface-color: rgba(26, 29, 38, 0.65);
+            --primary-color: #6c5ce7;
+            --primary-hover: #5b4bc4;
+            --accent-color: #00cec9;
+            --text-color: #f5f6fa;
+            --text-secondary: #a0a8c0;
+            --success-color: #2ecc71;
+            --danger-color: #e74c3c;
+            --warning-color: #f1c40f;
+            --border-color: rgba(255, 255, 255, 0.08);
+            --font-family: 'Outfit', sans-serif;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            background-image: 
+                radial-gradient(at 10% 20%, rgba(108, 92, 231, 0.15) 0px, transparent 50%),
+                radial-gradient(at 90% 80%, rgba(0, 206, 201, 0.1) 0px, transparent 50%);
+            background-attachment: fixed;
+            color: var(--text-color);
+            font-family: var(--font-family);
+            min-height: 100vh;
+            padding: 30px;
+        }
+
+        .dashboard-container {
+            max-width: 1400px;
+            margin: 0 auto;
+            display: grid;
+            grid-template-columns: 2.2fr 1fr;
+            gap: 25px;
+        }
+
+        /* Glassmorphism Panel styles */
+        .panel {
+            background: var(--surface-color);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid var(--border-color);
+            border-radius: 20px;
+            padding: 25px;
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+            margin-bottom: 25px;
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+
+        .panel:hover {
+            box-shadow: 0 8px 32px 0 rgba(108, 92, 231, 0.15);
+        }
+
+        h2 {
+            font-size: 1.3rem;
+            font-weight: 600;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 10px;
+        }
+
+        h2 i {
+            color: var(--primary-color);
+        }
+
+        /* Header Layout */
+        header {
+            grid-column: 1 / -1;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px 30px;
+            margin-bottom: 10px;
+        }
+
+        .logo-section h1 {
+            font-size: 2.2rem;
+            font-weight: 800;
+            background: linear-gradient(135deg, var(--text-color) 30%, var(--primary-color) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: -1px;
+        }
+
+        .logo-section p {
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+            margin-top: 2px;
+        }
+
+        .status-bar {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 30px;
+            font-size: 0.9rem;
+            border: 1px solid var(--border-color);
+        }
+
+        .pulse-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background-color: var(--danger-color);
+        }
+
+        .pulse-dot.online {
+            background-color: var(--success-color);
+            box-shadow: 0 0 12px var(--success-color);
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(0.9); opacity: 1; }
+            50% { transform: scale(1.2); opacity: 0.6; }
+            100% { transform: scale(0.9); opacity: 1; }
+        }
+
+        /* Navigation Tabs */
+        .nav-tabs {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 25px;
+            background: rgba(255, 255, 255, 0.03);
+            padding: 8px;
+            border-radius: 14px;
+            border: 1px solid var(--border-color);
+            width: fit-content;
+        }
+
+        .nav-tab {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 20px;
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-weight: 600;
+            border-radius: 10px;
+            transition: all 0.2s ease;
+        }
+
+        .nav-tab:hover {
+            color: var(--text-color);
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .nav-tab.active {
+            color: var(--text-color);
+            background: var(--primary-color);
+            box-shadow: 0 4px 15px rgba(108, 92, 231, 0.3);
+        }
+
+        button {
+            font-family: var(--font-family);
+            background-color: var(--primary-color);
+            color: var(--text-color);
+            border: none;
+            padding: 12px 24px;
+            font-weight: 600;
+            border-radius: 12px;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            transition: all 0.2s ease;
+        }
+
+        button:hover {
+            background-color: var(--primary-hover);
+            transform: translateY(-2px);
+        }
+
+        button:disabled {
+            background-color: rgba(255, 255, 255, 0.1);
+            color: var(--text-secondary);
+            cursor: not-allowed;
+            transform: none !important;
+        }
+
+        /* Form styling */
+        .form-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .form-group label {
+            font-weight: 600;
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+        }
+
+        input[type="text"], input[type="number"], select {
+            width: 100%;
+            background-color: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 10px 14px;
+            color: var(--text-color);
+            font-family: var(--font-family);
+            font-size: 0.95rem;
+            transition: border-color 0.2s ease;
+        }
+
+        input[type="text"]:focus, input[type="number"]:focus, select:focus {
+            outline: none;
+            border-color: var(--primary-color);
+        }
+
+        .checkbox-container {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            cursor: pointer;
+            height: 100%;
+            padding-top: 25px;
+        }
+
+        .checkbox-container input {
+            cursor: pointer;
+            width: 18px;
+            height: 18px;
+            accent-color: var(--primary-color);
+        }
+
+        /* KPI Card grid */
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 15px;
+            margin-bottom: 25px;
+        }
+
+        .metric-card {
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 15px;
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+
+        .metric-card .label {
+            color: var(--text-secondary);
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+        }
+
+        .metric-card .value {
+            font-size: 1.4rem;
+            font-weight: 800;
+        }
+
+        .metric-card.highlight .value {
+            color: var(--accent-color);
+        }
+
+        .metric-card.positive .value {
+            color: var(--success-color);
+        }
+
+        .metric-card.negative .value {
+            color: var(--danger-color);
+        }
+
+        /* Tables & Lists */
+        .table-container {
+            max-height: 400px;
+            overflow-y: auto;
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            background: rgba(255, 255, 255, 0.01);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+        }
+
+        th {
+            color: var(--text-secondary);
+            font-weight: 600;
+            font-size: 0.8rem;
+            padding: 12px 14px;
+            border-bottom: 1px solid var(--border-color);
+            text-transform: uppercase;
+            position: sticky;
+            top: 0;
+            background: #151720;
+            z-index: 10;
+        }
+
+        td {
+            padding: 12px 14px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+            font-size: 0.85rem;
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        .profit-pos { color: var(--success-color); font-weight: 600; }
+        .profit-neg { color: var(--danger-color); font-weight: 600; }
+
+        .badge {
+            display: inline-flex;
+            padding: 2px 6px;
+            border-radius: 6px;
+            font-size: 0.7rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .badge.win { background-color: rgba(46, 204, 113, 0.15); color: var(--success-color); }
+        .badge.loss { background-color: rgba(231, 76, 60, 0.15); color: var(--danger-color); }
+        .badge.buy { background-color: rgba(46, 204, 113, 0.1); color: var(--success-color); border: 1px solid rgba(46, 204, 113, 0.2); }
+        .badge.sell { background-color: rgba(231, 76, 60, 0.1); color: var(--danger-color); border: 1px solid rgba(231, 76, 60, 0.2); }
+
+        /* Empty state */
+        .empty-state {
+            text-align: center;
+            padding: 60px 40px;
+            color: var(--text-secondary);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .empty-state i {
+            font-size: 3rem;
+            color: rgba(255, 255, 255, 0.05);
+        }
+
+        /* Mockup Image Styling */
+        .mockup-container {
+            position: relative;
+            border-radius: 12px;
+            overflow: hidden;
+            border: 1px solid var(--border-color);
+            margin-bottom: 15px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+        }
+
+        .mockup-img {
+            width: 100%;
+            height: auto;
+            display: block;
+            transition: transform 0.3s ease;
+        }
+
+        .mockup-img:hover {
+            transform: scale(1.03);
+        }
+
+        .mockup-caption {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            text-align: center;
+            line-height: 1.4;
+            padding: 10px 5px;
+        }
+
+        /* Toast Popup */
+        .toast {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            background: var(--primary-color);
+            color: var(--text-color);
+            padding: 16px 24px;
+            border-radius: 12px;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            z-index: 1000;
+            transform: translateY(100px);
+            opacity: 0;
+            transition: all 0.3s cubic-bezier(0.68, -0.55, 0.27, 1.55);
+        }
+
+        .toast.show {
+            transform: translateY(0);
+            opacity: 1;
+        }
+
+        /* Loading SpinnerOverlay */
+        .loading-overlay {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(11, 12, 16, 0.8);
+            border-radius: 20px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            gap: 15px;
+            z-index: 100;
+            backdrop-filter: blur(8px);
+        }
+
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 5px solid rgba(255, 255, 255, 0.1);
+            border-top: 5px solid var(--primary-color);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .no-wrap {
+            white-space: nowrap;
+        }
+
+        /* Modal Style for screenshots */
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            overflow: auto;
+            background-color: rgba(0,0,0,0.85);
+            backdrop-filter: blur(8px);
+        }
+        .modal-content {
+            background-color: #1a1d26;
+            margin: 5% auto;
+            padding: 20px;
+            border: 1px solid var(--border-color);
+            width: 80%;
+            max-width: 900px;
+            border-radius: 20px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.5);
+            position: relative;
+            animation: modalFadeIn 0.3s ease;
+        }
+        @keyframes modalFadeIn {
+            from {transform: scale(0.9); opacity: 0;}
+            to {transform: scale(1); opacity: 1;}
+        }
+        .close-btn {
+            position: absolute;
+            right: 20px;
+            top: 15px;
+            color: var(--text-secondary);
+            font-size: 28px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: color 0.2s;
+        }
+        .close-btn:hover {
+            color: var(--danger-color);
+        }
+        .modal-img {
+            width: 100%;
+            height: auto;
+            border-radius: 10px;
+            margin-top: 15px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+        
+        .btn-screenshot {
+            background: rgba(108, 92, 231, 0.15);
+            border: 1px solid var(--primary-color);
+            color: var(--text-color);
+            padding: 5px 10px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            transition: background 0.2s, transform 0.2s;
+        }
+        .btn-screenshot:hover {
+            background: var(--primary-color);
+            transform: scale(1.05);
+        }
+    </style>
+</head>
+<body>
+
+    <div class="dashboard-container">
+        
+        <!-- Header -->
+        <header class="panel">
+            <div class="logo-section">
+                <h1>Gann Strategy Backtester</h1>
+                <p>W.D. Gann Price Angles & Fibonacci retracement simulator (1-Year Historical Analysis)</p>
+            </div>
+            <div class="status-bar">
+                <div class="status-indicator">
+                    <div id="mt5-pulse" class="pulse-dot"></div>
+                    <span id="mt5-status-text">MT5 Terminal: Offline</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Navigation Tabs -->
+        <nav class="nav-tabs" style="grid-column: 1 / -1; margin-bottom: 20px;">
+            <a href="/" class="nav-tab"><i class="fa-solid fa-gauge"></i> Live Dashboard</a>
+            <a href="/backtest" class="nav-tab active"><i class="fa-solid fa-vial"></i> Strategy Backtester</a>
+        </nav>
+
+        <!-- Main Column (Left) -->
+        <main>
+            
+            <!-- Config Form -->
+            <div class="panel" style="position: relative;">
+                <h2><i class="fa-solid fa-sliders"></i> Simulation Parameters</h2>
+                
+                <div id="loading-overlay" class="loading-overlay" style="display: none;">
+                    <div class="spinner"></div>
+                    <p style="font-weight: 600; letter-spacing: 0.5px;">Downloading candles and running backtest simulation...</p>
+                </div>
+
+                <form id="backtest-form" onsubmit="runBacktest(event)">
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label for="symbol">Symbol</label>
+                            <select id="symbol" required>
+                                <option value="EURUSDm">EURUSDm (Forex Euro)</option>
+                                <option value="GBPUSDm">GBPUSDm (Forex Cable)</option>
+                                <option value="USDJPYm">USDJPYm (Forex Yen)</option>
+                                <option value="ETHUSDm">ETHUSDm (Ethereum)</option>
+                                <option value="BNBUSDm">BNBUSDm (Binance Coin)</option>
+                                <option value="BTCUSDm">BTCUSDm (Bitcoin)</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="timeframe">Timeframe</label>
+                            <select id="timeframe" required>
+                                <option value="M15">M15 (15 Minutes)</option>
+                                <option value="M30" selected>M30 (30 Minutes)</option>
+                                <option value="H1">H1 (1 Hour)</option>
+                                <option value="H4">H4 (4 Hours)</option>
+                                <option value="D1">D1 (Daily)</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="years">Test Duration</label>
+                            <select id="years" required>
+                                <option value="0.5">6 Months</option>
+                                <option value="1.0" selected>1 Year</option>
+                                <option value="2.0">2 Years</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Gann Geometry</label>
+                            <input type="text" value="Auto-Detected (Market-Driven)" disabled style="background-color: rgba(255,255,255,0.01); color: var(--accent-color); border: 1px dashed var(--border-color); cursor: not-allowed; font-weight: 600;">
+                            <input type="hidden" id="geometry" value="dynamic">
+                        </div>
+                        <div class="form-group">
+                            <label for="lookback">Lookback (candles)</label>
+                            <input type="number" id="lookback" min="20" max="500" value="100" required>
+                        </div>
+                        <div class="form-group">
+                            <div class="checkbox-container">
+                                <input type="checkbox" id="use_grid" checked>
+                                <label for="use_grid" style="margin-bottom: 0; cursor: pointer; color: var(--accent-color);">Use Grid Recovery</label>
+                            </div>
+                        </div>
+                    </div>
+                    <button type="submit" id="btn-run" style="width: 100%; justify-content: center; font-size: 1.05rem;">
+                        <i class="fa-solid fa-play"></i> Run Backtest Simulation
+                    </button>
+                </form>
+            </div>
+
+            <!-- Results Section (Initially Hidden) -->
+            <div id="results-section" style="display: none;">
+                
+                <!-- Performance KPI Cards -->
+                <div class="metrics-grid">
+                    <div class="metric-card highlight" id="card-roi">
+                        <span class="label">Net ROI (%)</span>
+                        <span class="value" id="res-roi">+0.0%</span>
+                    </div>
+                    <div class="metric-card" id="card-balance">
+                        <span class="label">Ending Balance</span>
+                        <span class="value" id="res-balance">$500.00</span>
+                    </div>
+                    <div class="metric-card highlight" id="card-winrate">
+                        <span class="label">Win Rate (%)</span>
+                        <span class="value" id="res-winrate">0.0%</span>
+                    </div>
+                    <div class="metric-card" id="card-profitfactor">
+                        <span class="label">Profit Factor</span>
+                        <span class="value" id="res-profitfactor">1.00</span>
+                    </div>
+                    <div class="metric-card" id="card-drawdown">
+                        <span class="label">Max Drawdown</span>
+                        <span class="value" id="res-drawdown">0.0%</span>
+                    </div>
+                    <div class="metric-card" id="card-trades">
+                        <span class="label">Total Trades</span>
+                        <span class="value" id="res-trades">0</span>
+                    </div>
+                </div>
+
+                <!-- Interactive Price Trades Chart -->
+                <div class="panel">
+                    <h2><i class="fa-solid fa-chart-line"></i> Trade Entries & Price Chart (Last 1000 Candles)</h2>
+                    <div style="height: 350px; width: 100%;">
+                        <canvas id="priceChart"></canvas>
+                    </div>
+                </div>
+
+                <!-- Simulated Balance curve chart -->
+                <div class="panel">
+                    <h2><i class="fa-solid fa-wallet"></i> Simulated Equity Curve (Start: $500, Risk: 3%)</h2>
+                    <div style="height: 250px; width: 100%;">
+                        <canvas id="equityChart"></canvas>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- Empty State placeholder -->
+            <div class="panel" id="empty-results">
+                <div class="empty-state">
+                    <i class="fa-solid fa-chart-simple"></i>
+                    <h3>No simulation results loaded</h3>
+                    <p>Select your symbol and parameters above, then click "Run Backtest" to download history and view strategy analytics.</p>
+                </div>
+            </div>
+
+        </main>
+
+        <!-- Sidebar Column (Right) -->
+        <aside>
+            
+            <!-- Mockup Setup display -->
+            <div class="panel">
+                <h2><i class="fa-solid fa-image"></i> Strategy Pivot Mockup</h2>
+                <div class="mockup-container">
+                    <img class="mockup-img" src="/static/gann_trades_chart.png" alt="Gann Trades Setup">
+                </div>
+                <div class="mockup-caption">
+                    <i class="fa-solid fa-info-circle" style="color: var(--accent-color);"></i>
+                    Illustration of the A-B-C pivot structure, Fibonacci 50%-75% retracement zone, and Gann angles (Square of 9 price breakout layers).
+                </div>
+            </div>
+
+            <!-- Detailed simulated trades table -->
+            <div class="panel">
+                <h2><i class="fa-solid fa-history"></i> Trade History Log</h2>
+                <div class="table-container">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Date/Time</th>
+                                <th>Type</th>
+                                <th>Legs</th>
+                                <th>Pips</th>
+                                <th>Profit ($)</th>
+                                <th>Result</th>
+                                <th>Chart</th>
+                            </tr>
+                        </thead>
+                        <tbody id="trades-log-tbody">
+                            <tr>
+                                <td colspan="7" style="text-align: center; color: var(--text-secondary); padding: 30px;">
+                                    Run simulation to view trades log.
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+        </aside>
+
+    </div>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="toast">
+        <i class="fa-solid fa-circle-check"></i>
+        <span id="toast-text">Success!</span>
+    </div>
+
+    <script>
+        let priceChart = null;
+        let equityChart = null;
+
+        // Fetch API Status & Updates for header pulse
+        async function fetchStatus() {
+            try {
+                const res = await fetch('/api/status');
+                const data = await res.json();
+
+                const pulse = document.getElementById('mt5-pulse');
+                const text = document.getElementById('mt5-status-text');
+                if (data.mt5_connected) {
+                    pulse.className = 'pulse-dot online';
+                    text.textContent = 'MT5 Terminal: Connected';
+                } else {
+                    pulse.className = 'pulse-dot';
+                    text.textContent = 'MT5 Terminal: Offline';
+                }
+            } catch (err) {
+                console.error("Error fetching status:", err);
+            }
+        }
+
+        // Show Toast popup message
+        function showToast(text, isError = false) {
+            const toast = document.getElementById('toast');
+            const toastText = document.getElementById('toast-text');
+            const icon = toast.querySelector('i');
+            
+            toastText.textContent = text;
+            if (isError) {
+                toast.style.background = '#e74c3c';
+                icon.className = 'fa-solid fa-triangle-exclamation';
+            } else {
+                toast.style.background = '#6c5ce7';
+                icon.className = 'fa-solid fa-circle-check';
+            }
+
+            toast.classList.add('show');
+            setTimeout(() => {
+                toast.classList.remove('show');
+            }, 3000);
+        }
+
+        // Run Backtest AJAX POST
+        async function runBacktest(e) {
+            e.preventDefault();
+            
+            const btnRun = document.getElementById('btn-run');
+            const overlay = document.getElementById('loading-overlay');
+            
+            btnRun.disabled = true;
+            btnRun.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Simulating Strategy...';
+            overlay.style.display = 'flex';
+
+            const payload = {
+                symbol: document.getElementById('symbol').value,
+                timeframe: document.getElementById('timeframe').value,
+                years: parseFloat(document.getElementById('years').value),
+                geometry: document.getElementById('geometry').value,
+                lookback: parseInt(document.getElementById('lookback').value),
+                use_grid: document.getElementById('use_grid').checked
+            };
+
+            try {
+                const res = await fetch('/api/backtest', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                
+                const data = await res.json();
+                
+                if (!data.success) {
+                    showToast(data.error || "Simulation failed", true);
+                    return;
+                }
+
+                showToast("Simulation completed successfully!");
+                
+                // Hide empty state and show results panels
+                document.getElementById('empty-results').style.display = 'none';
+                document.getElementById('results-section').style.display = 'block';
+
+                // 1. Populate KPI Cards
+                const metrics = data.metrics;
+                
+                document.getElementById('res-roi').textContent = (metrics.roi >= 0 ? '+' : '') + metrics.roi.toFixed(1) + '%';
+                document.getElementById('card-roi').className = 'metric-card ' + (metrics.roi >= 0 ? 'positive' : 'negative');
+                
+                document.getElementById('res-balance').textContent = '$' + metrics.final_balance.toFixed(2);
+                document.getElementById('res-winrate').textContent = metrics.win_rate.toFixed(1) + '%';
+                document.getElementById('res-profitfactor').textContent = metrics.profit_factor >= 99.9 ? '∞' : metrics.profit_factor.toFixed(2);
+                document.getElementById('res-drawdown').textContent = metrics.max_drawdown.toFixed(1) + '%';
+                document.getElementById('res-trades').textContent = metrics.total_trades;
+
+                // 2. Plot Charts
+                initCharts(data.candles, data.trades, data.balance_curve);
+
+                // 3. Render Trades History Table
+                renderTradesTable(data.trades);
+
+            } catch (err) {
+                console.error("Backtest run error:", err);
+                showToast("Error communicating with backtesting server", true);
+            } finally {
+                btnRun.disabled = false;
+                btnRun.innerHTML = '<i class="fa-solid fa-play"></i> Run Backtest Simulation';
+                overlay.style.display = 'none';
+            }
+        }
+
+        // Chart Initialization using Chart.js
+        function initCharts(candles, trades, balanceCurve) {
+            // --- Chart A: Price and Trades Markers ---
+            const priceCtx = document.getElementById('priceChart').getContext('2d');
+            const labels = candles.map(c => {
+                const parts = c.time.split(' ');
+                return parts.length > 1 ? parts[1].substring(0, 5) : c.time;
+            });
+            const closes = candles.map(c => c.close);
+
+            // Align trade markers with the last 1000 candle timestamps
+            const candleTimes = candles.map(c => c.time);
+            
+            const buyPoints = [];
+            const sellPoints = [];
+            const exitPoints = [];
+
+            trades.forEach(t => {
+                const idxEntry = candleTimes.indexOf(t.entry_time);
+                const idxExit = candleTimes.indexOf(t.exit_time);
+
+                if (idxEntry !== -1) {
+                    const labelShort = labels[idxEntry];
+                    if (t.type === 'BUY') {
+                        buyPoints.push({ x: labelShort, y: t.entry_price });
+                    } else {
+                        sellPoints.push({ x: labelShort, y: t.entry_price });
+                    }
+                }
+
+                if (idxExit !== -1) {
+                    exitPoints.push({ x: labels[idxExit], y: t.exit_price });
+                }
+            });
+
+            if (priceChart) priceChart.destroy();
+            
+            priceChart = new Chart(priceCtx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [
+                        {
+                            label: 'Close Price',
+                            data: closes,
+                            borderColor: 'rgba(255, 255, 255, 0.35)',
+                            backgroundColor: 'transparent',
+                            borderWidth: 1.5,
+                            pointRadius: 0,
+                            tension: 0.1,
+                            order: 3
+                        },
+                        {
+                            label: 'BUY Entries',
+                            type: 'scatter',
+                            data: buyPoints,
+                            backgroundColor: '#2ecc71',
+                            borderColor: '#ffffff',
+                            borderWidth: 1,
+                            pointStyle: 'triangle',
+                            pointRadius: 8,
+                            hoverRadius: 10,
+                            order: 1
+                        },
+                        {
+                            label: 'SELL Entries',
+                            type: 'scatter',
+                            data: sellPoints,
+                            backgroundColor: '#e74c3c',
+                            borderColor: '#ffffff',
+                            borderWidth: 1,
+                            pointStyle: 'rectRot',
+                            pointRadius: 8,
+                            hoverRadius: 10,
+                            order: 1
+                        },
+                        {
+                            label: 'TP/SL Exits',
+                            type: 'scatter',
+                            data: exitPoints,
+                            backgroundColor: '#00cec9',
+                            borderColor: '#ffffff',
+                            borderWidth: 1,
+                            pointStyle: 'circle',
+                            pointRadius: 6,
+                            hoverRadius: 8,
+                            order: 2
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            labels: { color: '#f5f6fa', font: { family: 'Outfit' } }
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    return context.dataset.label + ': ' + context.parsed.y.toFixed(5);
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            grid: { color: 'rgba(255, 255, 255, 0.02)' },
+                            ticks: { color: '#a0a8c0', maxTicksLimit: 15, font: { family: 'Outfit' } }
+                        },
+                        y: {
+                            grid: { color: 'rgba(255, 255, 255, 0.02)' },
+                            ticks: { color: '#a0a8c0', font: { family: 'Outfit' } }
+                        }
+                    }
+                }
+            });
+
+            // --- Chart B: Account Balance Curve ---
+            const equityCtx = document.getElementById('equityChart').getContext('2d');
+            
+            // Default flat starting curve if no trades happened
+            const equityLabels = balanceCurve.length > 0 
+                ? balanceCurve.map(b => b.time.split(' ')[0]) 
+                : ['Start'];
+            const equityValues = balanceCurve.length > 0 
+                ? balanceCurve.map(b => b.balance) 
+                : [500.0];
+
+            if (equityChart) equityChart.destroy();
+
+            equityChart = new Chart(equityCtx, {
+                type: 'line',
+                data: {
+                    labels: equityLabels,
+                    datasets: [
+                        {
+                            label: 'Balance ($)',
+                            data: equityValues,
+                            borderColor: '#6c5ce7',
+                            backgroundColor: 'rgba(108, 92, 231, 0.05)',
+                            borderWidth: 2,
+                            pointRadius: balanceCurve.length > 50 ? 0 : 3,
+                            tension: 0.2,
+                            fill: true
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: false }
+                    },
+                    scales: {
+                        x: {
+                            grid: { color: 'rgba(255, 255, 255, 0.02)' },
+                            ticks: { color: '#a0a8c0', maxTicksLimit: 10, font: { family: 'Outfit' } }
+                        },
+                        y: {
+                            grid: { color: 'rgba(255, 255, 255, 0.02)' },
+                            ticks: { color: '#a0a8c0', font: { family: 'Outfit' } }
+                        }
+                    }
+                }
+            });
+        }
+
+        // Screenshot Modal Event Handlers and View Chart Logic
+        async function showBacktestChart(entry_time, exit_time, entry_price, sl_price, tp_price, gann_data_str) {
+            const modal = document.getElementById('screenshot-modal');
+            const modalTitle = document.getElementById('modal-title');
+            const loading = document.getElementById('modal-loading');
+            const img = document.getElementById('modal-image');
+
+            modal.style.display = 'block';
+            loading.style.display = 'block';
+            img.style.display = 'none';
+
+            const symbol = document.getElementById('symbol').value;
+            const timeframe = document.getElementById('timeframe').value;
+            let gann_data = null;
+            if (gann_data_str) {
+                try {
+                    gann_data = JSON.parse(decodeURIComponent(gann_data_str));
+                } catch(e) {
+                    console.error("Error parsing gann data:", e);
+                }
+            }
+
+            modalTitle.textContent = `${symbol} (${timeframe}) - Historical Trade`;
+
+            try {
+                const res = await fetch('/api/backtest/chart', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        symbol: symbol,
+                        timeframe: timeframe,
+                        entry_time: entry_time,
+                        exit_time: exit_time,
+                        entry_price: entry_price,
+                        sl_price: sl_price,
+                        tp_price: tp_price,
+                        gann_data: gann_data
+                    })
+                });
+
+                const data = await res.json();
+                if (data.success && data.screenshot_url) {
+                    img.src = data.screenshot_url + '?t=' + Date.now();
+                    img.style.display = 'block';
+                } else {
+                    alert("Error loading chart: " + (data.error || "Unknown error"));
+                    modal.style.display = 'none';
+                }
+            } catch(e) {
+                console.error("Error fetching backtest chart:", e);
+                alert("Error loading chart screenshot.");
+                modal.style.display = 'none';
+            } finally {
+                loading.style.display = 'none';
+            }
+        }
+
+        function closeScreenshotModal() {
+            document.getElementById('screenshot-modal').style.display = 'none';
+        }
+
+        // Close modal when clicking outside of it
+        window.addEventListener('click', function(event) {
+            const modal = document.getElementById('screenshot-modal');
+            if (event.target === modal) {
+                modal.style.display = 'none';
+            }
+        });
+
+        // Populate trades history table in right sidebar
+        function renderTradesTable(trades) {
+            const tbody = document.getElementById('trades-log-tbody');
+            tbody.innerHTML = '';
+
+            if (trades.length === 0) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="7" style="text-align: center; color: var(--text-secondary); padding: 30px;">
+                            No trades executed in this simulation.
+                        </td>
+                    </tr>
+                `;
+                return;
+            }
+
+            trades.forEach(t => {
+                const profClass = t.profit_usd >= 0 ? 'profit-pos' : 'profit-neg';
+                const profSign = t.profit_usd >= 0 ? '+' : '';
+                const resultBadge = t.result === 'WIN' ? 'badge win' : 'badge loss';
+                const actionBadge = t.type === 'BUY' ? 'badge buy' : 'badge sell';
+
+                const gannDataStr = t.gann_data ? encodeURIComponent(JSON.stringify(t.gann_data)) : '';
+                const screenshotButton = `<button class="btn-screenshot" onclick="showBacktestChart('${t.entry_time}', '${t.exit_time}', ${t.entry_price}, ${t.sl_price}, ${t.tp_price}, '${gannDataStr}')"><i class="fa-solid fa-camera"></i> View Chart</button>`;
+
+                tbody.innerHTML += `
+                    <tr>
+                        <td class="no-wrap" style="font-size: 0.8rem; color: var(--text-secondary);">
+                            ${t.exit_time.split(' ')[0]}<br>${t.exit_time.split(' ')[1] || ''}
+                        </td>
+                        <td><span class="${actionBadge}">${t.type}</span></td>
+                        <td>${t.legs}</td>
+                        <td>${t.pips > 0 ? '+' : ''}${t.pips}</td>
+                        <td><span class="${profClass}">${profSign}$${t.profit_usd.toFixed(2)}</span></td>
+                        <td><span class="${resultBadge}">${t.result}</span></td>
+                        <td>${screenshotButton}</td>
+                    </tr>
+                `;
+            });
+        }
+
+        // Initialization
+        window.addEventListener('DOMContentLoaded', () => {
+            fetchStatus();
+            // Refresh connection pulse every 5 seconds
+            setInterval(fetchStatus, 5000);
+        });
+    </script>
+    <!-- Screenshot Modal -->
+    <div id="screenshot-modal" class="modal">
+        <div class="modal-content">
+            <span class="close-btn" onclick="closeScreenshotModal()">&times;</span>
+            <h2 id="modal-title" style="border-bottom: 1px solid var(--border-color); padding-bottom: 10px; margin-top: 0;">Trade Chart Setup</h2>
+            <div id="modal-loading" style="display: none; text-align: center; padding: 40px;">
+                <div class="spinner" style="margin: 0 auto 15px auto;"></div>
+                <p style="color: var(--text-secondary);">Generating trade chart from MT5 history...</p>
+            </div>
+            <img id="modal-image" class="modal-img" src="" alt="Trade Chart Screenshot" style="display: none;">
+        </div>
+    </div>
+
+</body>
+</html>
