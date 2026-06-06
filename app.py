@@ -274,13 +274,24 @@ def generate_backtest_chart():
             return 30
             
         tf_mins = get_tf_mins(timeframe)
-        start_dt = entry_dt - timedelta(minutes=tf_mins * 30)
-        end_dt = exit_dt + timedelta(minutes=tf_mins * 30)
+        
+        # Determine start date based on pivot A if available to show the complete pattern
+        if gann_data and gann_data.get("time_A"):
+            try:
+                time_A_dt = datetime.strptime(gann_data["time_A"], "%Y-%m-%d %H:%M:%S")
+                # Pad starting date 10 candles before Point A to show structure context
+                start_dt = time_A_dt - timedelta(minutes=tf_mins * 10)
+            except Exception:
+                start_dt = entry_dt - timedelta(minutes=tf_mins * 300)
+        else:
+            start_dt = entry_dt - timedelta(minutes=tf_mins * 300)
+            
+        end_dt = exit_dt + timedelta(minutes=tf_mins * 20)
         
         rates = mt5.copy_rates_range(symbol, tf_constant, start_dt, end_dt)
         if rates is None or len(rates) == 0:
-            # Fallback: copy from entry time
-            rates = mt5.copy_rates_from(symbol, tf_constant, entry_dt, 100)
+            # Fallback: copy from entry time (300 candles to ensure we capture the pivot pattern)
+            rates = mt5.copy_rates_from(symbol, tf_constant, entry_dt, 300)
             
         if rates is None or len(rates) == 0:
             return jsonify({"success": False, "error": "Failed to fetch chart data"}), 404
@@ -296,6 +307,92 @@ def generate_backtest_chart():
             'close': 'Close',
             'tick_volume': 'Volume'
         }, inplace=True)
+        
+        # Find integer index of a timestamp
+        def get_idx_of_time(df_in, dt_str):
+            try:
+                target_dt = pd.to_datetime(dt_str)
+                idx = df_in.index.get_indexer([target_dt], method='nearest')[0]
+                if idx is not None and idx >= 0:
+                    return int(idx)
+            except Exception:
+                pass
+            return None
+
+        # Resolve entry, exit, and pivot indices on the uncropped dataframe
+        idx_entry_uncropped = get_idx_of_time(df, entry_time_str)
+        idx_exit_uncropped = get_idx_of_time(df, exit_time_str)
+        
+        idx_A_uncropped = None
+        idx_B_uncropped = None
+        idx_C_uncropped = None
+        
+        if gann_data:
+            trade_type = gann_data.get("type", "BUY")
+            val_A = gann_data.get("A")
+            val_B = gann_data.get("B")
+            val_C = gann_data.get("C")
+            
+            # Resolve Point A index
+            if gann_data.get("time_A"):
+                idx_A_uncropped = get_idx_of_time(df, gann_data["time_A"])
+            if (idx_A_uncropped is None or idx_A_uncropped < 0) and val_A is not None:
+                search_limit = idx_entry_uncropped if idx_entry_uncropped is not None else len(df)
+                col = 'High' if trade_type == 'SELL' else 'Low'
+                best_idx = None
+                min_diff = float('inf')
+                for i in range(0, search_limit):
+                    diff = abs(df.iloc[i][col] - val_A)
+                    if diff < min_diff:
+                        min_diff = diff
+                        best_idx = i
+                if min_diff <= val_A * 0.0005:
+                    idx_A_uncropped = best_idx
+                    
+            # Resolve Point B index
+            if gann_data.get("time_B"):
+                idx_B_uncropped = get_idx_of_time(df, gann_data["time_B"])
+            if (idx_B_uncropped is None or idx_B_uncropped < 0) and val_B is not None:
+                search_limit = idx_entry_uncropped if idx_entry_uncropped is not None else len(df)
+                col = 'Low' if trade_type == 'SELL' else 'High'
+                best_idx = None
+                min_diff = float('inf')
+                for i in range(0, search_limit):
+                    diff = abs(df.iloc[i][col] - val_B)
+                    if diff < min_diff:
+                        min_diff = diff
+                        best_idx = i
+                if min_diff <= val_B * 0.0005:
+                    idx_B_uncropped = best_idx
+                    
+            # Resolve Point C index
+            if gann_data.get("time_C"):
+                idx_C_uncropped = get_idx_of_time(df, gann_data["time_C"])
+            if (idx_C_uncropped is None or idx_C_uncropped < 0) and val_C is not None:
+                search_limit = idx_entry_uncropped if idx_entry_uncropped is not None else len(df)
+                col = 'High' if trade_type == 'SELL' else 'Low'
+                best_idx = None
+                min_diff = float('inf')
+                for i in range(0, search_limit):
+                    diff = abs(df.iloc[i][col] - val_C)
+                    if diff < min_diff:
+                        min_diff = diff
+                        best_idx = i
+                if min_diff <= val_C * 0.0005:
+                    idx_C_uncropped = best_idx
+                    
+        # Crop df to start 10 candles before Point A if found
+        crop_offset = 0
+        if idx_A_uncropped is not None and idx_A_uncropped >= 10:
+            crop_offset = idx_A_uncropped - 10
+            df = df.iloc[crop_offset:]
+            
+        # Calculate final cropped indices
+        idx_A = idx_A_uncropped - crop_offset if idx_A_uncropped is not None else None
+        idx_B = idx_B_uncropped - crop_offset if idx_B_uncropped is not None else None
+        idx_C = idx_C_uncropped - crop_offset if idx_C_uncropped is not None else None
+        idx_entry = idx_entry_uncropped - crop_offset if idx_entry_uncropped is not None else None
+        idx_exit = idx_exit_uncropped - crop_offset if idx_exit_uncropped is not None else None
         
         # Generate chart filename dynamically
         import os
@@ -327,9 +424,21 @@ def generate_backtest_chart():
             gridstyle='dashed'
         )
         
+        # Build horizontal lines
+        original_sl = gann_data.get("A") if gann_data else None
+        hlines = [entry_price, tp_price]
+        hl_colors = ['#f1c40f', '#2ecc71']
+        
+        if original_sl and abs(sl_price - original_sl) > 1e-5:
+            hlines.extend([sl_price, original_sl])
+            hl_colors.extend(['#e74c3c', '#d35400']) # red for trailed SL, orange for original SL (Point A)
+        else:
+            hlines.append(sl_price)
+            hl_colors.append('#e74c3c')
+            
         hlines_dict = dict(
-            hlines=[sl_price, entry_price, tp_price],
-            colors=['#e74c3c', '#f1c40f', '#2ecc71'],
+            hlines=hlines,
+            colors=hl_colors,
             linestyle='dashed',
             linewidths=1.5
         )
@@ -350,11 +459,91 @@ def generate_backtest_chart():
         )
         
         ax = axlist[0]
-        x_pos = len(df) - 5
-        ax.text(x_pos, sl_price, '  SL (Point A)', color='#e74c3c', fontsize=8, fontweight='bold', va='center')
-        ax.text(x_pos, entry_price, '  Entry', color='#f1c40f', fontsize=8, fontweight='bold', va='center')
+        x_pos = max(0, len(df) - 5)
+        
+        # Draw horizontal labels avoiding overlaps
+        if abs(sl_price - entry_price) < 1e-5:
+            ax.text(x_pos, entry_price, '  Entry / Trailed SL', color='#f1c40f', fontsize=8, fontweight='bold', va='center')
+        else:
+            ax.text(x_pos, entry_price, '  Entry', color='#f1c40f', fontsize=8, fontweight='bold', va='center')
+            ax.text(x_pos, sl_price, '  SL (Trailed)', color='#e74c3c', fontsize=8, fontweight='bold', va='center')
+            
         ax.text(x_pos, tp_price, '  TP (Target)', color='#2ecc71', fontsize=8, fontweight='bold', va='center')
         
+        if original_sl and abs(sl_price - original_sl) > 1e-5:
+            ax.text(x_pos, original_sl, '  Original SL (Point A)', color='#d35400', fontsize=8, fontweight='bold', va='center')
+        
+        # Swing pivot indices are already calculated and shifted above
+
+        # Plot Connectors and circles
+        pivots_x = []
+        pivots_y = []
+        
+        if gann_data:
+            trade_type = gann_data.get("type", "BUY")
+            
+            if idx_A is not None and idx_A >= 0:
+                val_A = gann_data.get("A")
+                if val_A:
+                    pivots_x.append(idx_A)
+                    pivots_y.append(val_A)
+                    ax.plot(idx_A, val_A, marker='o', color='#f39c12', markersize=8, zorder=5)
+                    va_A = 'top' if trade_type == 'BUY' else 'bottom'
+                    ax.text(idx_A, val_A, '  Point A (Origin)', color='#f39c12', fontsize=9, fontweight='bold', va=va_A, ha='left')
+                    
+            if idx_B is not None and idx_B >= 0:
+                val_B = gann_data.get("B")
+                if val_B:
+                    pivots_x.append(idx_B)
+                    pivots_y.append(val_B)
+                    ax.plot(idx_B, val_B, marker='o', color='#e67e22', markersize=8, zorder=5)
+                    va_B = 'bottom' if trade_type == 'BUY' else 'top'
+                    ax.text(idx_B, val_B, '  Point B (Breakout)', color='#e67e22', fontsize=9, fontweight='bold', va=va_B)
+                    
+            if idx_C is not None and idx_C >= 0:
+                val_C = gann_data.get("C")
+                if val_C:
+                    pivots_x.append(idx_C)
+                    pivots_y.append(val_C)
+                    ax.plot(idx_C, val_C, marker='o', color='#3498db', markersize=8, zorder=5)
+                    va_C = 'top' if trade_type == 'BUY' else 'bottom'
+                    ax.text(idx_C, val_C, '  Point C (Correction)', color='#3498db', fontsize=9, fontweight='bold', va=va_C)
+                    
+            if len(pivots_x) > 1:
+                # Sort by x coordinate to draw line correctly in chronological order
+                pivot_pts = sorted(zip(pivots_x, pivots_y))
+                px, py = zip(*pivot_pts)
+                ax.plot(px, py, color='#9b59b6', linestyle='dotted', linewidth=1.5, zorder=4)
+
+        # 2. Plot Entry and Exit vertical lines and markers
+        idx_exit = get_idx_of_time(df, exit_time_str)
+        
+        if idx_entry is not None and idx_entry >= 0:
+            ax.axvline(x=idx_entry, color='#f1c40f', linestyle='--', linewidth=0.8, alpha=0.7)
+            trade_type = gann_data.get('type') if gann_data else 'BUY'
+            ax.plot(idx_entry, entry_price, marker='^' if trade_type == 'BUY' else 'v', 
+                    color='#2ecc71' if trade_type == 'BUY' else '#e74c3c', markersize=8, zorder=6)
+            
+        if idx_exit is not None and idx_exit >= 0:
+            ax.axvline(x=idx_exit, color='#95a5a6', linestyle='--', linewidth=0.8, alpha=0.7)
+            result = data.get("result")
+            ax.plot(idx_exit, df.iloc[idx_exit]['Close'], marker='o', 
+                    color='#e74c3c' if result == 'LOSS' else '#2ecc71', markersize=6, zorder=6)
+
+        # 3. Draw outcome banner
+        result = data.get("result")
+        profit_usd = data.get("profit_usd")
+        if result:
+            result_color = '#2ecc71' if result == 'WIN' else '#e74c3c'
+            try:
+                prof_val = float(profit_usd)
+                result_text = f"Result: {result} (${prof_val:+.2f})"
+            except Exception:
+                result_text = f"Result: {result}"
+                
+            ax.text(0.02, 0.93, result_text, transform=ax.transAxes, color=result_color, 
+                    fontsize=10, fontweight='bold', bbox=dict(facecolor='#1e272e', alpha=0.85, edgecolor=result_color, boxstyle='round,pad=0.4'))
+
         fig.savefig(filepath, dpi=150, bbox_inches='tight')
         plt.close(fig)
         

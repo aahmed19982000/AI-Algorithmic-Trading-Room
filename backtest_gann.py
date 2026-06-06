@@ -330,7 +330,15 @@ def run_backtest_gann(df, symbol, geometry='square', lookback=100, use_grid=True
                             if val_C > val_A and val_B > val_C:
                                 ratio = (val_B - val_C) / (val_B - val_A)
                                 if 0.50 <= ratio <= 0.75:
-                                    buy_setup = {"A": val_A, "B": val_B, "C": val_C, "idx_B": idx_B}
+                                    buy_setup = {
+                                        "A": val_A,
+                                        "B": val_B,
+                                        "C": val_C,
+                                        "idx_B": idx_B,
+                                        "time_A": df.loc[idx_A, 'time'].strftime('%Y-%m-%d %H:%M:%S') if hasattr(df.loc[idx_A, 'time'], 'strftime') else str(df.loc[idx_A, 'time']),
+                                        "time_B": df.loc[idx_B, 'time'].strftime('%Y-%m-%d %H:%M:%S') if hasattr(df.loc[idx_B, 'time'], 'strftime') else str(df.loc[idx_B, 'time']),
+                                        "time_C": df.loc[idx_C, 'time'].strftime('%Y-%m-%d %H:%M:%S') if hasattr(df.loc[idx_C, 'time'], 'strftime') else str(df.loc[idx_C, 'time'])
+                                    }
                                     break
                                     
             sell_setup = None
@@ -346,7 +354,15 @@ def run_backtest_gann(df, symbol, geometry='square', lookback=100, use_grid=True
                             if val_C < val_A and val_B < val_C:
                                 ratio = (val_C - val_B) / (val_A - val_B)
                                 if 0.50 <= ratio <= 0.75:
-                                    sell_setup = {"A": val_A, "B": val_B, "C": val_C, "idx_B": idx_B}
+                                    sell_setup = {
+                                        "A": val_A,
+                                        "B": val_B,
+                                        "C": val_C,
+                                        "idx_B": idx_B,
+                                        "time_A": df.loc[idx_A, 'time'].strftime('%Y-%m-%d %H:%M:%S') if hasattr(df.loc[idx_A, 'time'], 'strftime') else str(df.loc[idx_A, 'time']),
+                                        "time_B": df.loc[idx_B, 'time'].strftime('%Y-%m-%d %H:%M:%S') if hasattr(df.loc[idx_B, 'time'], 'strftime') else str(df.loc[idx_B, 'time']),
+                                        "time_C": df.loc[idx_C, 'time'].strftime('%Y-%m-%d %H:%M:%S') if hasattr(df.loc[idx_C, 'time'], 'strftime') else str(df.loc[idx_C, 'time'])
+                                    }
                                     break
             
             if buy_setup and sell_setup:

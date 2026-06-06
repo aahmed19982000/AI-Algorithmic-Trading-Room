@@ -132,7 +132,10 @@ def detect_market_structure(df, lookback=100):
                                 "A": float(val_A),
                                 "B": float(val_B),
                                 "C": float(val_C),
-                                "idx_B": int(idx_B)
+                                "idx_B": int(idx_B),
+                                "time_A": df.loc[idx_A, 'time'].strftime('%Y-%m-%d %H:%M:%S') if 'time' in df.columns else str(df.index[idx_A]),
+                                "time_B": df.loc[idx_B, 'time'].strftime('%Y-%m-%d %H:%M:%S') if 'time' in df.columns else str(df.index[idx_B]),
+                                "time_C": df.loc[idx_C, 'time'].strftime('%Y-%m-%d %H:%M:%S') if 'time' in df.columns else str(df.index[idx_C])
                             }
                             break
 
@@ -157,7 +160,10 @@ def detect_market_structure(df, lookback=100):
                                 "A": float(val_A),
                                 "B": float(val_B),
                                 "C": float(val_C),
-                                "idx_B": int(idx_B)
+                                "idx_B": int(idx_B),
+                                "time_A": df.loc[idx_A, 'time'].strftime('%Y-%m-%d %H:%M:%S') if 'time' in df.columns else str(df.index[idx_A]),
+                                "time_B": df.loc[idx_B, 'time'].strftime('%Y-%m-%d %H:%M:%S') if 'time' in df.columns else str(df.index[idx_B]),
+                                "time_C": df.loc[idx_C, 'time'].strftime('%Y-%m-%d %H:%M:%S') if 'time' in df.columns else str(df.index[idx_C])
                             }
                             break
 

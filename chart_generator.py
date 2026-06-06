@@ -5,12 +5,13 @@ import matplotlib.pyplot as plt
 import mplfinance as mpf
 import pandas as pd
 import MetaTrader5 as mt5
-from datetime import datetime
+from datetime import datetime, timedelta
 
 def generate_chart_screenshot(symbol, ticket, entry_price, sl_price, tp_price, gann_data=None, timeframe_str="M30"):
     """
     Fetches historical candle data from MT5 and plots the candlesticks along with
-    Entry, TP, and SL horizontal lines. Saves the resulting image to the static screenshots folder.
+    Entry, TP, and SL horizontal lines, and highlights the Gann A-B-C pivot structure.
+    Saves the resulting image to the static screenshots folder.
     """
     # 1. Fetch candles from MT5
     if not mt5.initialize():
@@ -21,7 +22,37 @@ def generate_chart_screenshot(symbol, ticket, entry_price, sl_price, tp_price, g
     if tf is None:
         tf = mt5.TIMEFRAME_M30
         
-    rates = mt5.copy_rates_from_pos(symbol, tf, 0, 100)
+    # Get tf minutes for padding
+    def get_tf_mins(tf_s):
+        tf_s = tf_s.upper()
+        if tf_s.startswith("M"):
+            return int(tf_s[1:]) if tf_s[1:].isdigit() else 30
+        elif tf_s.startswith("H"):
+            return int(tf_s[1:]) * 60 if tf_s[1:].isdigit() else 60
+        elif tf_s == "D1":
+            return 1440
+        return 30
+        
+    tf_mins = get_tf_mins(timeframe_str)
+    rates = None
+    
+    # Try to fetch range starting from Point A to now
+    if gann_data and gann_data.get("time_A"):
+        try:
+            time_A_dt = datetime.strptime(gann_data["time_A"], "%Y-%m-%d %H:%M:%S")
+            start_date = time_A_dt - timedelta(minutes=tf_mins * 10)
+        except Exception as ex:
+            print(f"[SCREENSHOT] Error calculating start_dt from time_A: {ex}")
+            start_date = datetime.now() - timedelta(minutes=tf_mins * 300)
+    else:
+        start_date = datetime.now() - timedelta(minutes=tf_mins * 300)
+        
+    end_date = datetime.now() + timedelta(minutes=tf_mins * 20)
+    rates = mt5.copy_rates_range(symbol, tf, start_date, end_date)
+            
+    if rates is None or len(rates) == 0:
+        rates = mt5.copy_rates_from_pos(symbol, tf, 0, 300)
+        
     if rates is None or len(rates) == 0:
         raise RuntimeError(f"Failed to fetch rates for {symbol}")
         
@@ -36,6 +67,90 @@ def generate_chart_screenshot(symbol, ticket, entry_price, sl_price, tp_price, g
         'close': 'Close',
         'tick_volume': 'Volume'
     }, inplace=True)
+
+    # Find integer index of a timestamp
+    def get_idx_of_time(df_in, dt_str):
+        try:
+            target_dt = pd.to_datetime(dt_str)
+            idx = df_in.index.get_indexer([target_dt], method='nearest')[0]
+            if idx is not None and idx >= 0:
+                return int(idx)
+        except Exception:
+            pass
+        return None
+
+    # Resolve entry and swing pivot indices on the uncropped dataframe
+    idx_entry_uncropped = len(df) - 1
+    
+    idx_A_uncropped = None
+    idx_B_uncropped = None
+    idx_C_uncropped = None
+    
+    if gann_data:
+        trade_type = gann_data.get("type", "BUY")
+        val_A = gann_data.get("A")
+        val_B = gann_data.get("B")
+        val_C = gann_data.get("C")
+        
+        # Resolve Point A index
+        if gann_data.get("time_A"):
+            idx_A_uncropped = get_idx_of_time(df, gann_data["time_A"])
+        if (idx_A_uncropped is None or idx_A_uncropped < 0) and val_A is not None:
+            search_limit = idx_entry_uncropped
+            col = 'High' if trade_type == 'SELL' else 'Low'
+            best_idx = None
+            min_diff = float('inf')
+            for i in range(0, search_limit):
+                diff = abs(df.iloc[i][col] - val_A)
+                if diff < min_diff:
+                    min_diff = diff
+                    best_idx = i
+            if min_diff <= val_A * 0.0005:
+                idx_A_uncropped = best_idx
+                
+        # Resolve Point B index
+        if gann_data.get("time_B"):
+            idx_B_uncropped = get_idx_of_time(df, gann_data["time_B"])
+        if (idx_B_uncropped is None or idx_B_uncropped < 0) and val_B is not None:
+            search_limit = idx_entry_uncropped
+            col = 'Low' if trade_type == 'SELL' else 'High'
+            best_idx = None
+            min_diff = float('inf')
+            for i in range(0, search_limit):
+                diff = abs(df.iloc[i][col] - val_B)
+                if diff < min_diff:
+                    min_diff = diff
+                    best_idx = i
+            if min_diff <= val_B * 0.0005:
+                idx_B_uncropped = best_idx
+                
+        # Resolve Point C index
+        if gann_data.get("time_C"):
+            idx_C_uncropped = get_idx_of_time(df, gann_data["time_C"])
+        if (idx_C_uncropped is None or idx_C_uncropped < 0) and val_C is not None:
+            search_limit = idx_entry_uncropped
+            col = 'High' if trade_type == 'SELL' else 'Low'
+            best_idx = None
+            min_diff = float('inf')
+            for i in range(0, search_limit):
+                diff = abs(df.iloc[i][col] - val_C)
+                if diff < min_diff:
+                    min_diff = diff
+                    best_idx = i
+            if min_diff <= val_C * 0.0005:
+                idx_C_uncropped = best_idx
+                
+    # Crop df to start 10 candles before Point A if found
+    crop_offset = 0
+    if idx_A_uncropped is not None and idx_A_uncropped >= 10:
+        crop_offset = idx_A_uncropped - 10
+        df = df.iloc[crop_offset:]
+        
+    # Calculate final cropped indices
+    idx_A = idx_A_uncropped - crop_offset if idx_A_uncropped is not None else None
+    idx_B = idx_B_uncropped - crop_offset if idx_B_uncropped is not None else None
+    idx_C = idx_C_uncropped - crop_offset if idx_C_uncropped is not None else None
+    idx_entry = idx_entry_uncropped - crop_offset if idx_entry_uncropped is not None else None
     
     # 2. Setup directory
     static_dir = os.path.join(os.getcwd(), 'static', 'screenshots')
@@ -59,10 +174,21 @@ def generate_chart_screenshot(symbol, ticket, entry_price, sl_price, tp_price, g
         gridstyle='dashed'
     )
     
-    # Add horizontal lines for SL, Entry, TP
+    # Build horizontal lines
+    original_sl = gann_data.get("A") if gann_data else None
+    hlines = [entry_price, tp_price]
+    hl_colors = ['#f1c40f', '#2ecc71']
+    
+    if original_sl and abs(sl_price - original_sl) > 1e-5:
+        hlines.extend([sl_price, original_sl])
+        hl_colors.extend(['#e74c3c', '#d35400']) # red for trailed SL, orange for original SL (Point A)
+    else:
+        hlines.append(sl_price)
+        hl_colors.append('#e74c3c')
+        
     hlines_dict = dict(
-        hlines=[sl_price, entry_price, tp_price],
-        colors=['#e74c3c', '#f1c40f', '#2ecc71'],
+        hlines=hlines,
+        colors=hl_colors,
         linestyle='dashed',
         linewidths=1.5
     )
@@ -86,14 +212,61 @@ def generate_chart_screenshot(symbol, ticket, entry_price, sl_price, tp_price, g
     
     # Annotate lines on chart
     ax = axlist[0]
-    # Draw text annotations for SL, Entry, TP
-    # Get x coordinate for label placement (right side of chart)
-    x_pos = len(df) - 5
-    # Configure text color matching the lines
-    ax.text(x_pos, sl_price, '  SL (Point A)', color='#e74c3c', fontsize=8, fontweight='bold', va='center')
-    ax.text(x_pos, entry_price, '  Entry', color='#f1c40f', fontsize=8, fontweight='bold', va='center')
+    x_pos = max(0, len(df) - 5)
+    
+    # Draw horizontal labels avoiding overlaps
+    if abs(sl_price - entry_price) < 1e-5:
+        ax.text(x_pos, entry_price, '  Entry / Trailed SL', color='#f1c40f', fontsize=8, fontweight='bold', va='center')
+    else:
+        ax.text(x_pos, entry_price, '  Entry', color='#f1c40f', fontsize=8, fontweight='bold', va='center')
+        ax.text(x_pos, sl_price, '  SL (Trailed)', color='#e74c3c', fontsize=8, fontweight='bold', va='center')
+        
     ax.text(x_pos, tp_price, '  TP (Target)', color='#2ecc71', fontsize=8, fontweight='bold', va='center')
     
+    if original_sl and abs(sl_price - original_sl) > 1e-5:
+        ax.text(x_pos, original_sl, '  Original SL (Point A)', color='#d35400', fontsize=8, fontweight='bold', va='center')
+    
+    # Swing pivot indices are already calculated and shifted above
+
+    # Plot Connectors and circles
+    pivots_x = []
+    pivots_y = []
+    
+    if gann_data:
+        trade_type = gann_data.get("type", "BUY")
+        
+        if idx_A is not None and idx_A >= 0:
+            val_A = gann_data.get("A")
+            if val_A:
+                pivots_x.append(idx_A)
+                pivots_y.append(val_A)
+                ax.plot(idx_A, val_A, marker='o', color='#f39c12', markersize=8, zorder=5)
+                va_A = 'top' if trade_type == 'BUY' else 'bottom'
+                ax.text(idx_A, val_A, '  Point A (Origin)', color='#f39c12', fontsize=9, fontweight='bold', va=va_A, ha='left')
+                
+        if idx_B is not None and idx_B >= 0:
+            val_B = gann_data.get("B")
+            if val_B:
+                pivots_x.append(idx_B)
+                pivots_y.append(val_B)
+                ax.plot(idx_B, val_B, marker='o', color='#e67e22', markersize=8, zorder=5)
+                va_B = 'bottom' if trade_type == 'BUY' else 'top'
+                ax.text(idx_B, val_B, '  Point B (Breakout)', color='#e67e22', fontsize=9, fontweight='bold', va=va_B)
+                
+        if idx_C is not None and idx_C >= 0:
+            val_C = gann_data.get("C")
+            if val_C:
+                pivots_x.append(idx_C)
+                pivots_y.append(val_C)
+                ax.plot(idx_C, val_C, marker='o', color='#3498db', markersize=8, zorder=5)
+                va_C = 'top' if trade_type == 'BUY' else 'bottom'
+                ax.text(idx_C, val_C, '  Point C (Correction)', color='#3498db', fontsize=9, fontweight='bold', va=va_C)
+                
+        if len(pivots_x) > 1:
+            pivot_pts = sorted(zip(pivots_x, pivots_y))
+            px, py = zip(*pivot_pts)
+            ax.plot(px, py, color='#9b59b6', linestyle='dotted', linewidth=1.5, zorder=4)
+
     # Save again with annotations
     fig.savefig(filepath, dpi=150, bbox_inches='tight')
     plt.close(fig)
