@@ -1,12 +1,13 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" translate="no">
 <head>
     <meta charset="UTF-8">
+    <meta name="google" content="notranslate">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Gann Strategy Backtester | AI Algorithmic Trading Room</title>
     
     <!-- Google Fonts -->
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Cairo:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     
     <!-- FontAwesome Icons -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
@@ -27,13 +28,17 @@
             --danger-color: #e74c3c;
             --warning-color: #f1c40f;
             --border-color: rgba(255, 255, 255, 0.08);
-            --font-family: 'Outfit', sans-serif;
+            --font-family: 'Outfit', 'Cairo', sans-serif;
         }
 
         * {
             box-sizing: border-box;
             margin: 0;
             padding: 0;
+        }
+
+        main, aside {
+            min-width: 0;
         }
 
         body {
@@ -46,6 +51,7 @@
             font-family: var(--font-family);
             min-height: 100vh;
             padding: 30px;
+            overflow-x: hidden;
         }
 
         .dashboard-container {
@@ -532,9 +538,70 @@
             background: var(--primary-color);
             transform: scale(1.05);
         }
+
+        /* Mobile Responsiveness Styles */
+        @media (max-width: 900px) {
+            body {
+                padding: 10px;
+            }
+            .dashboard-container {
+                grid-template-columns: 1fr;
+                gap: 15px;
+            }
+            header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 15px;
+                padding: 15px 20px;
+            }
+            .logo-section h1 {
+                font-size: 1.6rem;
+            }
+            .logo-section p {
+                font-size: 0.8rem;
+            }
+            .status-bar {
+                flex-direction: column;
+                align-items: flex-start;
+                width: 100%;
+                gap: 10px;
+            }
+            .status-indicator {
+                width: 100%;
+                justify-content: flex-start;
+            }
+            .nav-tabs {
+                width: 100%;
+                overflow-x: auto;
+                white-space: nowrap;
+                display: flex;
+                gap: 8px;
+                padding: 6px;
+                -webkit-overflow-scrolling: touch;
+            }
+            .nav-tab {
+                flex-shrink: 0;
+                padding: 8px 12px;
+                font-size: 0.85rem;
+            }
+            .form-grid {
+                grid-template-columns: 1fr;
+                gap: 12px;
+            }
+            .checkbox-container {
+                padding-top: 5px;
+            }
+            /* Main column stacks above sidebar */
+            main {
+                order: 1;
+            }
+            aside {
+                order: 2;
+            }
+        }
     </style>
 </head>
-<body>
+<body class="notranslate">
 
     <div class="dashboard-container">
         
@@ -556,6 +623,9 @@
         <nav class="nav-tabs" style="grid-column: 1 / -1; margin-bottom: 20px;">
             <a href="/" class="nav-tab"><i class="fa-solid fa-gauge"></i> Live Dashboard</a>
             <a href="/backtest" class="nav-tab active"><i class="fa-solid fa-vial"></i> Strategy Backtester</a>
+            <a href="/portfolio" class="nav-tab"><i class="fa-solid fa-chart-pie"></i> Portfolio Report</a>
+            <a href="/bot-status" class="nav-tab"><i class="fa-solid fa-terminal"></i> Bot Activity Console</a>
+            <a href="/chat" class="nav-tab"><i class="fa-solid fa-comments"></i> AI Trade Analyst</a>
         </nav>
 
         <!-- Main Column (Left) -->

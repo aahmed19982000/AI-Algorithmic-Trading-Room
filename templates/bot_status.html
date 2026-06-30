@@ -1,0 +1,982 @@
+<!DOCTYPE html>
+<html lang="en" translate="no">
+<head>
+    <meta charset="UTF-8">
+    <meta name="google" content="notranslate">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bot Status & Activity Console</title>
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Cairo:wght@300;400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root {
+            --bg-color: #0b0c10;
+            --surface-color: rgba(21, 23, 33, 0.7);
+            --border-color: rgba(255, 255, 255, 0.08);
+            --text-color: #f1f2f6;
+            --text-secondary: #a4b0be;
+            --primary-color: #6c5ce7;
+            --accent-color: #00cec9;
+            --success-color: #2ecc71;
+            --warning-color: #f1c40f;
+            --danger-color: #e74c3c;
+            --console-bg: #050608;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Outfit', 'Cairo', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            background-image: 
+                radial-gradient(at 10% 10%, rgba(108, 92, 231, 0.08) 0px, transparent 50%),
+                radial-gradient(at 90% 90%, rgba(0, 206, 201, 0.08) 0px, transparent 50%);
+            background-attachment: fixed;
+            min-height: 100vh;
+            padding: 40px 20px;
+            overflow-x: hidden;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        /* Header styling */
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 20px;
+        }
+
+        .title-section h1 {
+            font-size: 2rem;
+            font-weight: 800;
+            background: linear-gradient(135deg, var(--text-color) 30%, var(--primary-color) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: -1px;
+        }
+
+        .title-section p {
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+            margin-top: 4px;
+        }
+
+        /* Status badges */
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            padding: 6px 12px;
+            border-radius: 20px;
+        }
+
+        .status-badge.connected {
+            background: rgba(46, 204, 113, 0.15);
+            color: var(--success-color);
+        }
+
+        .status-badge.disconnected {
+            background: rgba(231, 76, 60, 0.15);
+            color: var(--danger-color);
+        }
+
+        .status-badge.active-bot {
+            background: rgba(108, 92, 231, 0.15);
+            color: #a29bfe;
+        }
+
+        /* Navigation Tabs */
+        .nav-tabs {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 25px;
+            background: rgba(255, 255, 255, 0.03);
+            padding: 8px;
+            border-radius: 14px;
+            border: 1px solid var(--border-color);
+            width: fit-content;
+        }
+
+        .nav-tab {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 20px;
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-weight: 600;
+            border-radius: 10px;
+            transition: all 0.2s ease;
+        }
+
+        .nav-tab:hover {
+            color: var(--text-color);
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .nav-tab.active {
+            color: var(--text-color);
+            background: var(--primary-color);
+            box-shadow: 0 4px 15px rgba(108, 92, 231, 0.3);
+        }
+
+        /* Main Layout Grid */
+        .grid-layout {
+            display: grid;
+            grid-template-columns: 1.3fr 1fr;
+            gap: 30px;
+        }
+
+        .grid-layout > div {
+            min-width: 0;
+        }
+
+        @media (max-width: 1024px) {
+            .grid-layout {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 768px) {
+            body {
+                padding: 20px 10px;
+            }
+            header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 15px;
+            }
+            .title-section h1 {
+                font-size: 1.6rem;
+            }
+            .title-section p {
+                font-size: 0.8rem;
+            }
+            .panel-header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 12px;
+            }
+            .controls-bar {
+                width: 100%;
+            }
+            .controls-bar button {
+                width: 100%;
+                justify-content: center;
+            }
+            .console-dots {
+                display: none;
+            }
+            .console-header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 10px;
+            }
+            .console-actions {
+                width: 100%;
+                justify-content: space-between;
+            }
+            .nav-tabs {
+                width: 100%;
+                overflow-x: auto;
+                white-space: nowrap;
+                display: flex;
+                gap: 8px;
+                padding: 6px;
+                -webkit-overflow-scrolling: touch;
+            }
+            .nav-tab {
+                flex-shrink: 0;
+                padding: 8px 12px;
+                font-size: 0.85rem;
+            }
+            .console-body {
+                height: 400px;
+            }
+            .symbol-reports {
+                max-height: 500px;
+            }
+        }
+
+        /* Cards and Panels */
+        .panel {
+            background: var(--surface-color);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid var(--border-color);
+            border-radius: 20px;
+            padding: 25px;
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+            display: flex;
+            flex-direction: column;
+            transform: translateZ(0);
+        }
+
+        .panel-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 15px;
+        }
+
+        .panel-title {
+            font-size: 1.25rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .panel-title i {
+            color: var(--primary-color);
+        }
+
+        /* Terminal Console Box */
+        .console-container {
+            flex-grow: 1;
+            display: flex;
+            flex-direction: column;
+            background: var(--console-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        .console-header {
+            background: rgba(255, 255, 255, 0.03);
+            border-bottom: 1px solid var(--border-color);
+            padding: 10px 15px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .console-dots {
+            display: flex;
+            gap: 6px;
+        }
+
+        .console-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+        }
+        .console-dot.red { background: #ff5f56; }
+        .console-dot.yellow { background: #ffbd2e; }
+        .console-dot.green { background: #27c93f; }
+
+        .console-actions {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+        }
+
+        .console-btn {
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 0.85rem;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            transition: color 0.2s;
+        }
+
+        .console-btn:hover {
+            color: var(--text-color);
+        }
+
+        .console-body {
+            height: 550px;
+            overflow-y: auto;
+            padding: 15px;
+            font-family: 'Fira Code', monospace;
+            font-size: 0.85rem;
+            line-height: 1.5;
+            white-space: pre-wrap;
+            scroll-behavior: smooth;
+        }
+
+        .log-line {
+            margin-bottom: 6px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.01);
+            padding-bottom: 4px;
+        }
+
+        /* Console log coloring rules */
+        .log-time { color: #57606f; margin-right: 8px; }
+        .log-error { color: var(--danger-color); }
+        .log-warning { color: var(--warning-color); }
+        .log-success { color: var(--success-color); }
+        .log-info { color: var(--accent-color); }
+        .log-bot { color: #a29bfe; font-weight: bold; }
+        .log-ai { color: #00cec9; font-weight: bold; }
+        .log-scan { color: #e84393; }
+
+        /* Search input */
+        .search-container {
+            position: relative;
+            margin-bottom: 15px;
+        }
+
+        .search-container i {
+            position: absolute;
+            left: 12px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+        }
+
+        .search-input {
+            width: 100%;
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 10px 12px 10px 35px;
+            color: var(--text-color);
+            font-size: 0.9rem;
+            outline: none;
+            transition: border-color 0.3s ease;
+        }
+
+        .search-input:focus {
+            border-color: var(--primary-color);
+        }
+
+        /* Symbol scan report cards */
+        .symbol-reports {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            max-height: 690px;
+            overflow-y: auto;
+            padding-right: 5px;
+        }
+
+        .symbol-card {
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            overflow: hidden;
+            transition: transform 0.3s ease, border-color 0.3s ease;
+            transform: translateZ(0);
+        }
+
+        .symbol-card:hover {
+            border-color: rgba(108, 92, 231, 0.4);
+            transform: translateY(-2px);
+        }
+
+        .symbol-card-header {
+            padding: 15px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .symbol-badge {
+            font-weight: 700;
+            color: var(--text-color);
+            background: rgba(255, 255, 255, 0.05);
+            padding: 4px 8px;
+            border-radius: 6px;
+            border: 1px solid var(--border-color);
+            font-size: 0.95rem;
+        }
+
+        .symbol-status {
+            font-size: 0.75rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            padding: 4px 8px;
+            border-radius: 6px;
+        }
+
+        .symbol-status.open { background: rgba(52, 152, 219, 0.15); color: #3498db; }
+        .symbol-status.news { background: rgba(241, 196, 15, 0.15); color: var(--warning-color); }
+        .symbol-status.no-setup { background: rgba(149, 165, 166, 0.15); color: var(--text-secondary); }
+        .symbol-status.hold { background: rgba(230, 126, 34, 0.15); color: #e67e22; }
+        .symbol-status.buy { background: rgba(46, 204, 113, 0.15); color: var(--success-color); }
+        .symbol-status.sell { background: rgba(231, 76, 60, 0.15); color: var(--danger-color); }
+        .symbol-status.error { background: rgba(231, 76, 60, 0.15); color: var(--danger-color); }
+
+        .symbol-card-body {
+            display: none;
+            padding: 15px;
+            border-top: 1px solid var(--border-color);
+            background: rgba(0, 0, 0, 0.15);
+            font-size: 0.9rem;
+            line-height: 1.5;
+        }
+
+        .symbol-card-body.show {
+            display: block;
+        }
+
+        .card-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+            padding-bottom: 6px;
+        }
+
+        .card-row.last {
+            border-bottom: none;
+            margin-bottom: 0;
+            padding-bottom: 0;
+        }
+
+        .card-label {
+            color: var(--text-secondary);
+            font-weight: 500;
+        }
+
+        .card-value {
+            font-weight: bold;
+        }
+
+        .ai-reason-box {
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 10px;
+            margin-top: 10px;
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            font-style: italic;
+        }
+
+        /* Control Bar styling */
+        .controls-bar {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+        }
+
+        .control-btn {
+            background: var(--primary-color);
+            border: 1px solid var(--primary-color);
+            color: var(--text-color);
+            padding: 10px 20px;
+            border-radius: 10px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            transition: all 0.3s ease;
+        }
+
+        .control-btn:hover {
+            box-shadow: 0 0 15px rgba(108, 92, 231, 0.4);
+            transform: translateY(-1px);
+        }
+
+        .control-btn.secondary {
+            background: rgba(255, 255, 255, 0.05);
+            border-color: var(--border-color);
+        }
+
+        .control-btn.secondary:hover {
+            background: rgba(255, 255, 255, 0.1);
+            box-shadow: none;
+        }
+
+        /* Scrollbar styling */
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        ::-webkit-scrollbar-track {
+            background: rgba(0, 0, 0, 0.1);
+        }
+        ::-webkit-scrollbar-thumb {
+            background: var(--border-color);
+            border-radius: 3px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(255,255,255,0.2);
+        }
+
+        /* Pseudo-element selectors to prevent translation wipeout of dynamic text */
+        .symbol-badge::before {
+            content: attr(data-sym);
+            color: var(--text-color) !important;
+        }
+
+        .symbol-status::before {
+            content: attr(data-status);
+        }
+
+        .symbol-time::before {
+            content: attr(data-time);
+        }
+
+        .card-label::before {
+            content: attr(data-label);
+        }
+
+        .card-value::before {
+            content: attr(data-val);
+        }
+
+        .no-gann-structure::before {
+            content: attr(data-text);
+        }
+
+        .ai-reason-title::before {
+            content: attr(data-title);
+            margin-right: 5px;
+        }
+
+        .ai-reason-text::before {
+            content: attr(data-text);
+        }
+
+        .badge-text::before {
+            content: attr(data-text);
+        }
+
+        .last-scan-time::before {
+            content: attr(data-time);
+        }
+
+        .no-reports-msg::before {
+            content: attr(data-text);
+        }
+
+        .no-reports-submsg::before {
+            content: attr(data-text);
+        }
+
+        .loading-msg::before {
+            content: attr(data-text);
+        }
+
+        .no-logs-msg::before {
+            content: attr(data-text);
+        }
+
+        /* Log elements using pseudo-elements */
+        .log-time::before {
+            content: attr(data-time);
+        }
+
+        .log-text::before {
+            content: attr(data-text);
+        }
+    </style>
+</head>
+<body class="notranslate">
+
+    <div class="container">
+        <!-- Header -->
+        <header>
+            <div class="title-section">
+                <h1>Bot Activity & Status Console</h1>
+                <p>Real-time execution log and AI symbol scanning breakdown</p>
+            </div>
+            <div style="display: flex; gap: 15px; align-items: center;">
+                <div id="mt5-status-badge" class="status-badge disconnected">
+                    <i class="fa-solid fa-circle-nodes"></i> <span class="badge-text" data-text="Checking MT5..."></span>
+                </div>
+                <div id="bot-status-badge" class="status-badge disconnected">
+                    <i class="fa-solid fa-robot"></i> <span class="badge-text" data-text="Scanner: Idle"></span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Navigation Tabs -->
+        <nav class="nav-tabs">
+            <a href="/" class="nav-tab"><i class="fa-solid fa-gauge"></i> Live Dashboard</a>
+            <a href="/backtest" class="nav-tab"><i class="fa-solid fa-vial"></i> Strategy Backtester</a>
+            <a href="/portfolio" class="nav-tab"><i class="fa-solid fa-chart-pie"></i> Portfolio Report</a>
+            <a href="/bot-status" class="nav-tab active"><i class="fa-solid fa-terminal"></i> Bot Activity Console</a>
+            <a href="/chat" class="nav-tab"><i class="fa-solid fa-comments"></i> AI Trade Analyst</a>
+        </nav>
+
+        <!-- Layout Grid -->
+        <div class="grid-layout">
+            
+            <!-- Console Panel (Left) -->
+            <div class="panel">
+                <div class="panel-header">
+                    <div class="panel-title">
+                        <i class="fa-solid fa-terminal"></i> Live Execution Terminal
+                    </div>
+                    <div class="controls-bar">
+                        <button class="control-btn" id="btn-manual-scan" onclick="triggerScan()">
+                            <i class="fa-solid fa-rotate"></i> Scan Now
+                        </button>
+                    </div>
+                </div>
+
+                <div class="search-container">
+                    <i class="fa-solid fa-magnifying-glass"></i>
+                    <input type="text" id="console-search" class="search-input" placeholder="Search log text..." oninput="updateConsoleView()">
+                </div>
+
+                <div class="console-container">
+                    <div class="console-header">
+                        <div class="console-dots">
+                            <span class="console-dot red"></span>
+                            <span class="console-dot yellow"></span>
+                            <span class="console-dot green"></span>
+                        </div>
+                        <div class="console-actions">
+                            <label style="font-size: 0.8rem; display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                                <input type="checkbox" id="chk-autoscroll" checked> Auto-scroll
+                            </label>
+                            <button class="console-btn" onclick="clearConsoleLocal()">
+                                <i class="fa-solid fa-trash-can"></i> Clear Terminal
+                            </button>
+                        </div>
+                    </div>
+                    <div class="console-body" id="console-body">
+                        <!-- Logs filled by Javascript -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- Symbol Report Panel (Right) -->
+            <div class="panel">
+                <div class="panel-header">
+                    <div class="panel-title">
+                        <i class="fa-solid fa-chart-line"></i> Last Scan Breakdown
+                    </div>
+                    <span class="last-scan-time" style="font-size: 0.85rem; color: var(--text-secondary);" id="txt-last-scan-time" data-time="Last scan: Never"></span>
+                </div>
+
+                <div class="search-container">
+                    <i class="fa-solid fa-magnifying-glass"></i>
+                    <input type="text" id="report-search" class="search-input" placeholder="Filter by symbol..." oninput="filterSymbolCards()">
+                </div>
+
+                <div class="symbol-reports" id="symbol-reports-container">
+                    <!-- Cards filled by Javascript -->
+                    <div style="text-align: center; padding: 40px; color: var(--text-secondary);">
+                        <i class="fa-solid fa-spinner fa-spin" style="font-size: 2rem; margin-bottom: 10px;"></i>
+                        <p class="loading-msg" data-text="Waiting for scan reports..."></p>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <script>
+        let fullLogs = [];
+        let clearedOffset = 0;
+        let activeCardSymbol = null; // Track open card
+
+        // Clear local console representation
+        function clearConsoleLocal() {
+            clearedOffset = fullLogs.length;
+            document.getElementById('console-body').innerHTML = '';
+        }
+
+        function escapeHtml(str) {
+            if (!str) return '';
+            return str
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        }
+
+        // Format log lines with color coding
+        function formatLogLine(rawLine) {
+            // Log pattern: [15:10:05] [MESSAGE]
+            const timestampMatch = rawLine.match(/^\[\d{2}:\d{2}:\d{2}\]/);
+            let timeStr = "";
+            let textStr = rawLine;
+
+            if (timestampMatch) {
+                timeStr = timestampMatch[0];
+                textStr = rawLine.substring(timeStr.length).trim();
+            }
+
+            let spanClass = "";
+            if (textStr.toUpperCase().includes("[ERROR]")) {
+                spanClass = "log-line log-error";
+            } else if (textStr.toUpperCase().includes("[WARNING]") || textStr.toUpperCase().includes("[RISK]")) {
+                spanClass = "log-line log-warning";
+            } else if (textStr.toUpperCase().includes("[OK]") || textStr.toUpperCase().includes("[DB]") || textStr.includes("success")) {
+                spanClass = "log-line log-success";
+            } else if (textStr.includes("🔎 Scanning") || textStr.includes("STARTING SCANNING CYCLE")) {
+                spanClass = "log-line log-scan";
+            } else if (textStr.startsWith("[BOT") || textStr.includes("[SYNC]") || textStr.includes("[GRID")) {
+                spanClass = "log-line log-bot";
+            } else if (textStr.includes("[AI") || textStr.includes("🎯 [AI")) {
+                spanClass = "log-line log-ai";
+            } else if (textStr.startsWith("➡️ [AI")) {
+                spanClass = "log-line log-ai";
+            } else {
+                spanClass = "log-line";
+            }
+
+            const escapedTime = escapeHtml(timeStr);
+            const escapedText = escapeHtml(textStr);
+            return `<div class="${spanClass}"><span class="log-time" data-time="${escapedTime}"></span><span class="log-text" data-text="${escapedText}"></span></div>`;
+        }
+
+        // Filter and update log terminal screen
+        function updateConsoleView() {
+            const container = document.getElementById('console-body');
+            const search = document.getElementById('console-search').value.toLowerCase().trim();
+            const autoscroll = document.getElementById('chk-autoscroll').checked;
+
+            // Save scroll state
+            const wasAtBottom = container.scrollHeight - container.clientHeight <= container.scrollTop + 20;
+
+            const visibleLogs = fullLogs.slice(clearedOffset);
+            let htmlContent = "";
+
+            visibleLogs.forEach(line => {
+                if (search === "" || line.toLowerCase().includes(search)) {
+                    htmlContent += formatLogLine(line);
+                }
+            });
+
+            container.innerHTML = htmlContent || `<div class="no-logs-msg" style="color: #57606f; font-style: italic;" data-text="No logs matching filter."></div>`;
+
+            if (autoscroll && (wasAtBottom || search === "")) {
+                container.scrollTop = container.scrollHeight;
+            }
+        }
+
+        // Toggle card details drawer
+        function toggleCard(symbol) {
+            const body = document.getElementById(`card-body-${symbol}`);
+            const arrow = document.getElementById(`arrow-${symbol}`);
+            if (body.classList.contains('show')) {
+                body.classList.remove('show');
+                arrow.className = 'fa-solid fa-chevron-down';
+                if (activeCardSymbol === symbol) activeCardSymbol = null;
+            } else {
+                // Close previously opened card
+                if (activeCardSymbol) {
+                    const oldBody = document.getElementById(`card-body-${activeCardSymbol}`);
+                    const oldArrow = document.getElementById(`arrow-${activeCardSymbol}`);
+                    if (oldBody) oldBody.classList.remove('show');
+                    if (oldArrow) oldArrow.className = 'fa-solid fa-chevron-down';
+                }
+                body.classList.add('show');
+                arrow.className = 'fa-solid fa-chevron-up';
+                activeCardSymbol = symbol;
+            }
+        }
+
+        // Filter cards by search bar
+        function filterSymbolCards() {
+            const search = document.getElementById('report-search').value.toLowerCase().trim();
+            const cards = document.querySelectorAll('.symbol-card');
+
+            cards.forEach(card => {
+                const sym = card.dataset.symbol.toLowerCase();
+                if (search === "" || sym.includes(search)) {
+                    card.style.display = '';
+                } else {
+                    card.style.display = 'none';
+                }
+            });
+        }
+
+        // Trigger manual scan API
+        async function triggerScan() {
+            const btn = document.getElementById('btn-manual-scan');
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Scanning...';
+            
+            try {
+                const res = await fetch('/api/scan', { method: 'POST' });
+                const data = await res.json();
+                if (!data.success) {
+                    alert("Scan failed: " + data.error);
+                }
+            } catch (err) {
+                console.error("Scan error:", err);
+            }
+            
+            setTimeout(() => {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fa-solid fa-rotate"></i> Scan Now';
+            }, 3000);
+        }
+
+        // Get status and reports
+        async function fetchBotActivity() {
+            try {
+                const res = await fetch('/api/bot-activity');
+                const data = await res.json();
+
+                if (!data.success) return;
+
+                // 1. Update Badges
+                const mt5Badge = document.getElementById('mt5-status-badge');
+                if (data.mt5_connected) {
+                    mt5Badge.className = 'status-badge connected';
+                    mt5Badge.innerHTML = '<i class="fa-solid fa-circle-check"></i> <span class="badge-text" data-text="MT5: Online"></span>';
+                } else {
+                    mt5Badge.className = 'status-badge disconnected';
+                    mt5Badge.innerHTML = '<i class="fa-solid fa-circle-xmark"></i> <span class="badge-text" data-text="MT5: Offline"></span>';
+                }
+
+                const botBadge = document.getElementById('bot-status-badge');
+                if (data.scan_in_progress) {
+                    botBadge.className = 'status-badge active-bot';
+                    botBadge.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> <span class="badge-text" data-text="Scanner: Running"></span>';
+                } else {
+                    botBadge.className = 'status-badge connected';
+                    botBadge.innerHTML = '<i class="fa-solid fa-robot"></i> <span class="badge-text" data-text="Scanner: Active"></span>';
+                }
+
+                document.getElementById('txt-last-scan-time').setAttribute('data-time', `Last scan: ${data.last_scan_time || 'Never'}`);
+
+                // 2. Render console logs
+                const consoleSearch = document.getElementById('console-search').value.toLowerCase().trim();
+                const logBody = document.getElementById('console-body');
+
+                // Check if length increased
+                if (data.logs.length !== fullLogs.length) {
+                    fullLogs = data.logs;
+                    updateConsoleView();
+                }
+
+                // 3. Render Symbol reports
+                const reportsContainer = document.getElementById('symbol-reports-container');
+                const reports = data.scan_reports;
+                const symbols = Object.keys(reports);
+
+                if (symbols.length === 0) {
+                    reportsContainer.innerHTML = `
+                        <div style="text-align: center; padding: 40px; color: var(--text-secondary);">
+                            <i class="fa-solid fa-circle-info" style="font-size: 2rem; margin-bottom: 10px; color: var(--primary-color);"></i>
+                            <p class="no-reports-msg" data-text="No symbols have been scanned in the current session yet."></p>
+                            <p class="no-reports-submsg" style="font-size: 0.8rem; margin-top: 5px;" data-text="Press 'Scan Now' to run scanning cycle."></p>
+                        </div>
+                    `;
+                    return;
+                }
+
+                let cardsHtml = "";
+                // Sort symbols alphabetically
+                symbols.sort().forEach(sym => {
+                    const rep = reports[sym];
+                    if (!rep) return;
+                    
+                    const statusText = rep.status || 'Unknown';
+                    const timestampText = rep.timestamp || 'Never';
+                    const detailsText = rep.details || 'No details provided.';
+                    const timeOnly = timestampText.includes(' ') ? timestampText.split(' ')[1] : timestampText;
+
+                    // Determine class for badge
+                    let statusClass = "no-setup";
+                    const statusLower = statusText.toLowerCase();
+                    if (statusLower.includes("buy")) statusClass = "buy";
+                    else if (statusLower.includes("sell")) statusClass = "sell";
+                    else if (statusLower.includes("hold")) statusClass = "hold";
+                    else if (statusLower.includes("news")) statusClass = "news";
+                    else if (statusLower.includes("open")) statusClass = "open";
+                    else if (statusLower.includes("error") || statusLower.includes("fail")) statusClass = "error";
+                    else if (statusLower.includes("reject")) statusClass = "hold";
+
+                    const isShow = (activeCardSymbol === sym) ? "show" : "";
+                    const arrowIcon = (activeCardSymbol === sym) ? "fa-chevron-up" : "fa-chevron-down";
+
+                    let gannDetailsHtml = "";
+                    if (rep.structure) {
+                        const s = rep.structure;
+                        gannDetailsHtml = `
+                            <div class="card-row">
+                                <span class="card-label" data-label="Pivot Type:"></span>
+                                <span class="card-value" style="color: ${s.type === 'BUY' ? 'var(--success-color)' : 'var(--danger-color)'}" data-val="${s.type || 'N/A'}"></span>
+                            </div>
+                            <div class="card-row">
+                                <span class="card-label" data-label="Pivot A / B / C:"></span>
+                                <span class="card-value" data-val="${(s.A || 0).toFixed(5)} / ${(s.B || 0).toFixed(5)} / ${(s.C || 0).toFixed(5)}"></span>
+                            </div>
+                            <div class="card-row">
+                                <span class="card-label" data-label="Correction Pullback:"></span>
+                                <span class="card-value" data-val="${(s.retracement_pct || 0).toFixed(1)}%"></span>
+                            </div>
+                            <div class="card-row">
+                                <span class="card-label" data-label="Gann Entry / Target Angle:"></span>
+                                <span class="card-value" data-val="${s.entry_angle || 0}° / ${s.target_angle || 0}°"></span>
+                            </div>
+                            <div class="card-row">
+                                <span class="card-label" data-label="Projected TP / SL:"></span>
+                                <div style="display: flex; gap: 8px;">
+                                    <span class="card-value" style="color: #00cec9;" data-val="${(s.target_price || 0).toFixed(5)}"></span>
+                                    <span class="card-value" style="color: var(--danger-color);" data-val="${(s.sl_price || 0).toFixed(5)}"></span>
+                                </div>
+                            </div>
+                        `;
+                    } else {
+                        gannDetailsHtml = `
+                            <div class="no-gann-structure" data-text="No active Gann pivot structure."></div>
+                        `;
+                    }
+
+                    cardsHtml += `
+                        <div class="symbol-card notranslate" data-symbol="${sym}">
+                            <div class="symbol-card-header" onclick="toggleCard('${sym}')">
+                                <div style="display: flex; align-items: center; gap: 10px;">
+                                    <span class="symbol-badge" data-sym="${sym}"></span>
+                                    <span class="symbol-status ${statusClass}" data-status="${statusText}"></span>
+                                </div>
+                                <div style="display: flex; align-items: center; gap: 15px; color: var(--text-secondary);">
+                                    <span class="symbol-time" style="font-size: 0.8rem;" data-time="${timeOnly}"></span>
+                                    <i class="fa-solid ${arrowIcon}" id="arrow-${sym}"></i>
+                                </div>
+                            </div>
+                            <div class="symbol-card-body ${isShow}" id="card-body-${sym}">
+                                ${gannDetailsHtml}
+                                <div class="ai-reason-box">
+                                    <strong class="ai-reason-title" data-title="AI reasoning:"></strong>
+                                    <span class="ai-reason-text" data-text="${escapeHtml(detailsText)}"></span>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                });
+
+                reportsContainer.innerHTML = cardsHtml;
+                filterSymbolCards(); // Re-apply card filtering if user is searching
+
+            } catch (err) {
+                console.error("Error fetching activity:", err);
+            }
+        }
+
+        // Initialize and poll every 2 seconds
+        window.addEventListener('DOMContentLoaded', () => {
+            fetchBotActivity();
+            setInterval(fetchBotActivity, 2000);
+        });
+    </script>
+</body>
+</html>

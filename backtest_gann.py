@@ -509,7 +509,7 @@ def print_gann_report(trades, symbol, timeframe_str):
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Backtest W.D. Gann Price Angles on historical MT5 data.")
-    parser.add_argument("--symbol", type=str, default="EURUSDm", help="Trading symbol (e.g. EURUSDm)")
+    parser.add_argument("--symbol", type=str, default="EURUSDm", help="Trading symbol (e.g. EURUSDm, or comma-separated list e.g. EURUSDm,GBPUSDm)")
     parser.add_argument("--timeframe", type=str, default="M30", help="Timeframe (e.g. M30)")
     parser.add_argument("--years", type=int, default=1, help="Years of data to backtest")
     parser.add_argument("--geometry", type=str, default="square", help="Geometry (square, triangle, pentagon)")
@@ -523,14 +523,54 @@ def main():
         sys.exit(1)
         
     try:
-        df = fetch_backtest_data(args.symbol, args.timeframe, args.years)
-        if df is None:
-            sys.exit(1)
+        symbols = [s.strip() for s in args.symbol.split(",") if s.strip()]
+        results = {}
+        
+        for sym in symbols:
+            df = fetch_backtest_data(sym, args.timeframe, args.years)
+            if df is None or len(df) == 0:
+                print(f"[WARNING] Skipping symbol {sym} due to lack of historical data.")
+                continue
+                
+            trades = run_backtest_gann(df, sym, geometry=args.geometry, lookback=args.lookback, use_grid=not args.no_grid)
+            results[sym] = trades
+            print_gann_report(trades, sym, args.timeframe)
             
-        trades = run_backtest_gann(df, args.symbol, geometry=args.geometry, lookback=args.lookback, use_grid=not args.no_grid)
-        
-        print_gann_report(trades, args.symbol, args.timeframe)
-        
+        if len(results) > 1:
+            print("\n" + "=" * 95)
+            print("                        COMPARATIVE PORTFOLIO BACKTEST SUMMARY")
+            print("=" * 95)
+            print(f"{'Symbol':<12} | {'Trades':<6} | {'Wins/Losses':<12} | {'Win Rate':<8} | {'Net ROI (%)':<12} | {'Max DD (%)':<11} | {'Profit Factor':<13}")
+            print("-" * 95)
+            for sym, trades in results.items():
+                total = len(trades)
+                if total == 0:
+                    print(f"{sym:<12} | {'0':<6} | {'0/0':<12} | {'0.0%':<8} | {'+0.0%':<12} | {'0.0%':<11} | {'0.00':<13}")
+                    continue
+                wins = sum(1 for t in trades if t["result"] == "WIN")
+                losses = sum(1 for t in trades if t["result"] == "LOSS")
+                win_rate = (wins / total) * 100.0
+                
+                gross_win_pips = sum(t["pips"] for t in trades if t["pips"] > 0)
+                gross_loss_pips = abs(sum(t["pips"] for t in trades if t["pips"] < 0))
+                pf = gross_win_pips / gross_loss_pips if gross_loss_pips > 0 else (99.99 if gross_win_pips > 0 else 1.0)
+                
+                balance = 500.0
+                peak = 500.0
+                max_dd = 0.0
+                for t in trades:
+                    balance += t["profit_usd_raw"]
+                    if balance > peak:
+                        peak = balance
+                    dd = (peak - balance) / peak * 100.0
+                    if dd > max_dd:
+                        max_dd = dd
+                roi = ((balance - 500.0) / 500.0) * 100.0
+                
+                pf_str = f"{pf:.2f}" if pf < 99.99 else "99.99"
+                print(f"{sym:<12} | {total:<6} | {f'{wins}/{losses}':<12} | {f'{win_rate:.1f}%':<8} | {f'{roi:+.1f}%':<12} | {f'{max_dd:.1f}%':<11} | {pf_str:<13}")
+            print("=" * 95)
+            
     finally:
         disconnect_mt5()
 

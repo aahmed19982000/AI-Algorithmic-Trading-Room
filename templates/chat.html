@@ -1,0 +1,747 @@
+<!DOCTYPE html>
+<html lang="en" translate="no">
+<head>
+    <meta charset="UTF-8">
+    <meta name="google" content="notranslate">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Trade Analyst - Chat</title>
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Cairo:wght@300;400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Marked.js Markdown Parser -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/4.3.0/marked.min.js"></script>
+    <style>
+        :root {
+            --bg-color: #0b0c10;
+            --surface-color: rgba(21, 23, 33, 0.7);
+            --border-color: rgba(255, 255, 255, 0.08);
+            --text-color: #f1f2f6;
+            --text-secondary: #a4b0be;
+            --primary-color: #6c5ce7;
+            --accent-color: #00cec9;
+            --success-color: #2ecc71;
+            --warning-color: #f1c40f;
+            --danger-color: #e74c3c;
+            --console-bg: #050608;
+            --chat-user-bg: rgba(108, 92, 231, 0.2);
+            --chat-bot-bg: rgba(255, 255, 255, 0.04);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Outfit', 'Cairo', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            background-image: 
+                radial-gradient(at 10% 10%, rgba(108, 92, 231, 0.08) 0px, transparent 50%),
+                radial-gradient(at 90% 90%, rgba(0, 206, 201, 0.08) 0px, transparent 50%);
+            background-attachment: fixed;
+            min-height: 100vh;
+            padding: 40px 20px;
+            overflow-x: hidden;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        /* Header styling */
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 20px;
+        }
+
+        .title-section h1 {
+            font-size: 2rem;
+            font-weight: 800;
+            background: linear-gradient(135deg, var(--text-color) 30%, var(--primary-color) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: -1px;
+        }
+
+        .title-section p {
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+            margin-top: 4px;
+        }
+
+        /* Navigation Tabs */
+        .nav-tabs {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 25px;
+            background: rgba(255, 255, 255, 0.03);
+            padding: 8px;
+            border-radius: 14px;
+            border: 1px solid var(--border-color);
+            width: fit-content;
+        }
+
+        .nav-tab {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 20px;
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-weight: 600;
+            border-radius: 10px;
+            transition: all 0.2s ease;
+        }
+
+        .nav-tab:hover {
+            color: var(--text-color);
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .nav-tab.active {
+            color: var(--text-color);
+            background: var(--primary-color);
+            box-shadow: 0 4px 15px rgba(108, 92, 231, 0.3);
+        }
+
+        /* Main Grid Layout */
+        .chat-grid {
+            display: grid;
+            grid-template-columns: 350px 1fr;
+            gap: 30px;
+            height: 700px;
+        }
+
+        @media (max-width: 900px) {
+            body {
+                padding: 20px 10px;
+            }
+            header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 15px;
+            }
+            .title-section h1 {
+                font-size: 1.6rem;
+            }
+            .title-section p {
+                font-size: 0.8rem;
+            }
+            .nav-tabs {
+                width: 100%;
+                overflow-x: auto;
+                white-space: nowrap;
+                display: flex;
+                gap: 8px;
+                padding: 6px;
+                -webkit-overflow-scrolling: touch;
+            }
+            .nav-tab {
+                flex-shrink: 0;
+                padding: 8px 12px;
+                font-size: 0.85rem;
+            }
+            .chat-grid {
+                grid-template-columns: 1fr;
+                grid-template-rows: auto 1fr;
+                height: calc(100vh - 220px);
+                min-height: 500px;
+                gap: 15px;
+            }
+            .trades-list {
+                flex-direction: row;
+                overflow-x: auto;
+                overflow-y: hidden;
+                white-space: nowrap;
+                height: 95px;
+                padding-bottom: 5px;
+            }
+            .trade-card {
+                display: inline-block;
+                width: 220px;
+                flex-shrink: 0;
+                margin-right: 10px;
+            }
+            .message-bubble {
+                max-width: 90%;
+            }
+            .panel {
+                padding: 12px !important;
+            }
+            .panel-header {
+                margin-bottom: 10px;
+                padding-bottom: 10px;
+            }
+        }
+
+        /* Panels */
+        .panel {
+            background: var(--surface-color);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid var(--border-color);
+            border-radius: 20px;
+            padding: 20px;
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .panel-header {
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 15px;
+            margin-bottom: 15px;
+        }
+
+        .panel-title {
+            font-size: 1.15rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .panel-title i {
+            color: var(--primary-color);
+        }
+
+        /* Trades List (Sidebar) */
+        .trades-list {
+            flex-grow: 1;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            padding-right: 5px;
+        }
+
+        .trade-card {
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 12px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .trade-card:hover {
+            border-color: rgba(108, 92, 231, 0.4);
+            background: rgba(255, 255, 255, 0.04);
+            transform: translateY(-1px);
+        }
+
+        .trade-card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        .trade-symbol::before {
+            content: attr(data-sym);
+            font-weight: 700;
+            color: var(--text-color);
+        }
+
+        .trade-action::before {
+            content: attr(data-act);
+        }
+        .trade-action {
+            font-size: 0.75rem;
+            font-weight: 700;
+            padding: 2px 6px;
+            border-radius: 4px;
+            text-transform: uppercase;
+        }
+        .trade-action.buy { background: rgba(46, 204, 113, 0.15); color: var(--success-color); }
+        .trade-action.sell { background: rgba(231, 76, 60, 0.15); color: var(--danger-color); }
+
+        .trade-card-body {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+        }
+
+        .trade-ticket::before {
+            content: attr(data-tick);
+        }
+
+        .trade-profit::before {
+            content: attr(data-prof);
+        }
+        .trade-profit {
+            font-weight: bold;
+        }
+        .trade-profit.win { color: var(--success-color); }
+        .trade-profit.loss { color: var(--danger-color); }
+
+        /* Chat Window Panel */
+        .chat-container {
+            display: flex;
+            flex-grow: 1;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .chat-messages {
+            flex-grow: 1;
+            overflow-y: auto;
+            padding: 15px;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .message-bubble {
+            max-width: 80%;
+            padding: 14px 18px;
+            border-radius: 16px;
+            line-height: 1.5;
+            font-size: 0.95rem;
+            word-wrap: break-word;
+            animation: fadeInBubble 0.25s ease-out;
+        }
+
+        @keyframes fadeInBubble {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .message-bubble.user {
+            align-self: flex-end;
+            background: var(--chat-user-bg);
+            border-bottom-right-radius: 4px;
+            border: 1px solid rgba(108, 92, 231, 0.2);
+        }
+
+        .message-bubble.bot {
+            align-self: flex-start;
+            background: var(--chat-bot-bg);
+            border-bottom-left-radius: 4px;
+            border: 1px solid var(--border-color);
+        }
+
+        /* Markdown formatting inside bot bubble */
+        .message-bubble.bot p {
+            margin-bottom: 8px;
+        }
+        .message-bubble.bot p:last-child {
+            margin-bottom: 0;
+        }
+        .message-bubble.bot ul, .message-bubble.bot ol {
+            margin-left: 20px;
+            margin-bottom: 8px;
+        }
+        .message-bubble.bot li {
+            margin-bottom: 4px;
+        }
+        .message-bubble.bot strong {
+            color: var(--accent-color);
+        }
+        .message-bubble.bot code {
+            font-family: 'Fira Code', monospace;
+            background: rgba(0, 0, 0, 0.3);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.85rem;
+            color: #ff7675;
+            direction: ltr !important;
+            display: inline-block;
+        }
+        .message-bubble.bot pre {
+            background: rgba(0, 0, 0, 0.4);
+            padding: 12px;
+            border-radius: 8px;
+            overflow-x: auto;
+            margin: 10px 0;
+            border: 1px solid var(--border-color);
+            direction: ltr !important;
+            text-align: left !important;
+        }
+        .message-bubble.bot pre code {
+            background: none;
+            padding: 0;
+            color: var(--text-color);
+            direction: ltr !important;
+            display: block;
+        }
+
+        /* Typing Indicator */
+        .typing-indicator {
+            display: none;
+            align-self: flex-start;
+            background: var(--chat-bot-bg);
+            border: 1px solid var(--border-color);
+            padding: 12px 18px;
+            border-radius: 16px;
+            border-bottom-left-radius: 4px;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .typing-dot {
+            width: 8px;
+            height: 8px;
+            background-color: var(--text-secondary);
+            border-radius: 50%;
+            animation: bounce 1.3s infinite ease-in-out;
+        }
+
+        .typing-dot:nth-child(2) { animation-delay: 0.15s; }
+        .typing-dot:nth-child(3) { animation-delay: 0.3s; }
+
+        @keyframes bounce {
+            0%, 60%, 100% { transform: translateY(0); }
+            30% { transform: translateY(-6px); }
+        }
+
+        /* Chat Input Bar */
+        .chat-input-bar {
+            display: flex;
+            gap: 12px;
+            border-top: 1px solid var(--border-color);
+            padding-top: 15px;
+            margin-top: 10px;
+        }
+
+        .chat-input {
+            flex-grow: 1;
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 14px 16px;
+            color: var(--text-color);
+            font-size: 0.95rem;
+            outline: none;
+            transition: border-color 0.3s ease;
+        }
+
+        .chat-input:focus {
+            border-color: var(--primary-color);
+        }
+
+        .send-btn {
+            background: var(--primary-color);
+            border: none;
+            color: var(--text-color);
+            width: 50px;
+            height: 50px;
+            border-radius: 12px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.1rem;
+            transition: all 0.2s ease;
+        }
+
+        .send-btn:hover {
+            box-shadow: 0 4px 15px rgba(108, 92, 231, 0.4);
+            transform: translateY(-1px);
+        }
+
+        .send-btn:disabled {
+            background: rgba(255, 255, 255, 0.05);
+            color: var(--text-secondary);
+            cursor: not-allowed;
+            box-shadow: none;
+            transform: none;
+        }
+
+        /* Pseudo-element content selectors */
+        .badge-text::before { content: attr(data-text); }
+        .empty-trades::before { content: attr(data-text); }
+
+        /* Scrollbar styling */
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        ::-webkit-scrollbar-track {
+            background: rgba(0, 0, 0, 0.1);
+        }
+        ::-webkit-scrollbar-thumb {
+            background: var(--border-color);
+            border-radius: 3px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <!-- Header -->
+        <header>
+            <div class="title-section">
+                <h1>AI Trading Analyst</h1>
+                <p>Chat with Gemini to review and analyze past order executions</p>
+            </div>
+            <div id="ai-status-badge" class="status-badge active-bot" style="display: flex; gap: 6px; align-items: center; font-size: 0.8rem; font-weight: 600; padding: 6px 12px; border-radius: 20px; background: rgba(108, 92, 231, 0.15); color: #a29bfe;">
+                <i class="fa-solid fa-brain"></i> <span class="badge-text" data-text="Gemini 2.5 Active"></span>
+            </div>
+        </header>
+
+        <!-- Navigation Tabs -->
+        <nav class="nav-tabs">
+            <a href="/" class="nav-tab"><i class="fa-solid fa-gauge"></i> Live Dashboard</a>
+            <a href="/backtest" class="nav-tab"><i class="fa-solid fa-vial"></i> Strategy Backtester</a>
+            <a href="/portfolio" class="nav-tab"><i class="fa-solid fa-chart-pie"></i> Portfolio Report</a>
+            <a href="/bot-status" class="nav-tab"><i class="fa-solid fa-terminal"></i> Bot Activity Console</a>
+            <a href="/chat" class="nav-tab active"><i class="fa-solid fa-comments"></i> AI Trade Analyst</a>
+        </nav>
+
+        <!-- Main Chat Grid -->
+        <div class="chat-grid">
+            
+            <!-- Left Sidebar (Trades List) -->
+            <div class="panel">
+                <div class="panel-header">
+                    <div class="panel-title">
+                        <i class="fa-solid fa-history"></i> Recent Trades
+                    </div>
+                </div>
+                <div class="trades-list">
+                    {% if trades %}
+                        {% for t in trades %}
+                            {% set is_win = t.profit >= 0 %}
+                            {% set action_class = 'buy' if t.action == 'BUY' else 'sell' %}
+                            <div class="trade-card notranslate" onclick="selectTrade('{{ t.ticket }}', '{{ t.symbol }}', '{{ t.action }}')">
+                                <div class="trade-card-header">
+                                    <span class="trade-symbol" data-sym="{{ t.symbol }}"></span>
+                                    <span class="trade-action {{ action_class }}" data-act="{{ t.action }}"></span>
+                                </div>
+                                <div class="trade-card-body">
+                                    <span class="trade-ticket" data-tick="Ticket #{{ t.ticket }}"></span>
+                                    <span class="trade-profit {{ 'win' if is_win else 'loss' }}" data-prof="{{ '+' if is_win else '' }}{{ '%.2f' | format(t.profit) }} USD"></span>
+                                </div>
+                            </div>
+                        {% endfor %}
+                    {% else %}
+                        <div class="empty-trades" style="text-align: center; color: var(--text-secondary); padding: 40px 0;" data-text="No trade history found in DB."></div>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- Right Column (Chat Console) -->
+            <div class="panel">
+                <div class="panel-header" style="display: flex; justify-content: space-between; align-items: center;">
+                    <div class="panel-title">
+                        <i class="fa-solid fa-comments"></i> AI Analyst Chat
+                    </div>
+                    <button class="console-btn" onclick="clearChatHistory()" style="color: var(--danger-color); border: none; background: none; cursor: pointer; display: flex; align-items: center; gap: 5px;">
+                        <i class="fa-solid fa-trash-can"></i> <span class="badge-text" data-text="Clear Chat"></span>
+                    </button>
+                </div>
+                <div class="chat-container">
+                    <div class="chat-messages" id="chat-messages-container">
+                        <!-- Welcome message -->
+                        <div class="message-bubble bot notranslate" style="direction: rtl; text-align: right;">
+                            <p>أهلاً بك! أنا مدرب ومحلل التداول الذكي الخاص بك. 📊🤖</p>
+                            <p>يمكنني إعطاؤك تحليلاً دقيقاً لصفقاتك المسجلة وسبب فتحها أو إغلاقها بناءً على زوايا جان (Gann) ونموذج التعافي (Martingale).</p>
+                            <p><strong>اختر أي صفقة من القائمة الجانبية</strong> لتحليلها فوراً، أو اسألني مباشرة عما يدور في ذهنك!</p>
+                        </div>
+                    </div>
+
+                    <!-- Typing indicator -->
+                    <div class="typing-indicator" id="chat-typing-indicator">
+                        <div class="typing-dot"></div>
+                        <div class="typing-dot"></div>
+                        <div class="typing-dot"></div>
+                    </div>
+
+                    <!-- Input bar -->
+                    <form onsubmit="sendMessage(event)">
+                        <div class="chat-input-bar">
+                            <input type="text" id="chat-user-input" class="chat-input" placeholder="Ask about a trade or write your message..." autocomplete="off">
+                            <button type="submit" id="chat-send-btn" class="send-btn">
+                                <i class="fa-solid fa-paper-plane"></i>
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <script>
+        let chatHistory = [];
+
+        // Helper to check if text contains Arabic characters
+        function isArabic(text) {
+            return /[\u0600-\u06FF]/.test(text);
+        }
+
+        // Load chat history from localStorage on load
+        window.addEventListener('DOMContentLoaded', () => {
+            loadHistoryFromStorage();
+        });
+
+        function loadHistoryFromStorage() {
+            try {
+                const stored = localStorage.getItem('trading_chat_history_v1');
+                if (stored) {
+                    chatHistory = JSON.parse(stored);
+                    
+                    // Clear initial welcome message if we have loaded history
+                    const container = document.getElementById('chat-messages-container');
+                    if (chatHistory.length > 0) {
+                        container.innerHTML = '';
+                    }
+                    
+                    // Render all messages in chatHistory
+                    chatHistory.forEach(msg => {
+                        appendMessage(msg.role === 'user' ? 'user' : 'bot', msg.text);
+                    });
+                }
+            } catch (err) {
+                console.error("Failed to load chat history:", err);
+            }
+        }
+
+        function saveHistoryToStorage() {
+            try {
+                localStorage.setItem('trading_chat_history_v1', JSON.stringify(chatHistory));
+            } catch (err) {
+                console.error("Failed to save chat history:", err);
+            }
+        }
+
+        function clearChatHistory() {
+            if (confirm("هل أنت متأكد من مسح سجل المحادثة؟\nAre you sure you want to clear the chat history?")) {
+                chatHistory = [];
+                localStorage.removeItem('trading_chat_history_v1');
+                
+                const container = document.getElementById('chat-messages-container');
+                container.innerHTML = `
+                    <!-- Welcome message -->
+                    <div class="message-bubble bot notranslate" style="direction: rtl; text-align: right;">
+                        <p>أهلاً بك! أنا مدرب ومحلل التداول الذكي الخاص بك. 📊🤖</p>
+                        <p>يمكنني إعطاؤك تحليلاً دقيقاً لصفقاتك المسجلة وسبب فتحها أو إغلاقها بناءً على زوايا جان (Gann) ونموذج التعافي (Martingale).</p>
+                        <p><strong>اختر أي صفقة من القائمة الجانبية</strong> لتحليلها فوراً، أو اسألني مباشرة عما يدور في ذهنك!</p>
+                    </div>
+                `;
+            }
+        }
+
+        // Prepopulate chat box when a trade is clicked
+        function selectTrade(ticket, symbol, action) {
+            const inputField = document.getElementById('chat-user-input');
+            inputField.value = `حلل لي الصفقة رقم #${ticket} لزوج ${symbol} واخبرني بالتفصيل كيف تمت الصفقة وما هي زوايا جان ونقاط الدخول والاستوب والهدف وسبب الإغلاق؟`;
+            inputField.focus();
+        }
+
+        // Add message to chat area
+        function appendMessage(sender, text) {
+            const container = document.getElementById('chat-messages-container');
+            const bubble = document.createElement('div');
+            
+            const isAr = isArabic(text);
+            
+            if (sender === 'user') {
+                bubble.className = 'message-bubble user notranslate';
+                bubble.textContent = text;
+                if (isAr) {
+                    bubble.style.direction = 'rtl';
+                    bubble.style.textAlign = 'right';
+                } else {
+                    bubble.style.direction = 'ltr';
+                    bubble.style.textAlign = 'left';
+                }
+            } else {
+                bubble.className = 'message-bubble bot';
+                // Render markdown for bot response
+                bubble.innerHTML = marked.parse(text);
+                if (isAr) {
+                    bubble.style.direction = 'rtl';
+                    bubble.style.textAlign = 'right';
+                } else {
+                    bubble.style.direction = 'ltr';
+                    bubble.style.textAlign = 'left';
+                }
+            }
+            
+            container.appendChild(bubble);
+            container.scrollTop = container.scrollHeight;
+        }
+
+        // Send message to Flask API
+        async function sendMessage(event) {
+            event.preventDefault();
+            
+            const inputField = document.getElementById('chat-user-input');
+            const sendBtn = document.getElementById('chat-send-btn');
+            const indicator = document.getElementById('chat-typing-indicator');
+            
+            const message = inputField.value.trim();
+            if (!message) return;
+            
+            // Clear input and disable send
+            inputField.value = '';
+            inputField.disabled = true;
+            sendBtn.disabled = true;
+            
+            // Render user message
+            appendMessage('user', message);
+            
+            // Show typing indicator
+            indicator.style.display = 'flex';
+            
+            try {
+                const res = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        message: message,
+                        history: chatHistory
+                    })
+                });
+                
+                const data = await res.json();
+                
+                // Hide indicator
+                indicator.style.display = 'none';
+                
+                if (data.success) {
+                    // Render bot reply
+                    appendMessage('bot', data.response);
+                    
+                    // Save to history
+                    chatHistory.push({ role: 'user', text: message });
+                    chatHistory.push({ role: 'model', text: data.response });
+                    
+                    // Keep history brief (last 10 messages)
+                    if (chatHistory.length > 20) {
+                        chatHistory = chatHistory.slice(-20);
+                    }
+                    
+                    // Save to localStorage
+                    saveHistoryToStorage();
+                } else {
+                    appendMessage('bot', `⚠️ عفواً، حدث خطأ أثناء الاتصال بمحرك الذكاء الاصطناعي: ${data.error}`);
+                }
+            } catch (err) {
+                indicator.style.display = 'none';
+                appendMessage('bot', '⚠️ عفواً، فشل الاتصال بالخادم. تأكد من أن السيرفر يعمل بشكل صحيح.');
+                console.error(err);
+            } finally {
+                inputField.disabled = false;
+                sendBtn.disabled = false;
+                inputField.focus();
+            }
+        }
+    </script>
+</body>
+</html>

@@ -9,6 +9,31 @@ Also runs the trading bot scanner in a background thread.
 import sys
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
+import collections
+
+class LogCaptureStream:
+    def __init__(self, original_stream):
+        self.original_stream = original_stream
+        self.buffer = collections.deque(maxlen=1000)
+
+    def write(self, message):
+        self.original_stream.write(message)
+        if message and message.strip():
+            timestamp = time.strftime('%H:%M:%S')
+            for line in message.splitlines():
+                line_stripped = line.strip()
+                if line_stripped:
+                    self.buffer.append(f"[{timestamp}] {line_stripped}")
+
+    def flush(self):
+        self.original_stream.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.original_stream, name)
+
+sys.stdout = LogCaptureStream(sys.stdout)
+sys.stderr = LogCaptureStream(sys.stderr)
+
 import os
 import time
 import threading
@@ -23,10 +48,11 @@ from db_manager import (
     save_settings, 
     get_trade_history, 
     get_balance_history,
-    log_balance_snapshot
+    log_balance_snapshot,
+    get_db_connection
 )
 from news_filter import get_upcoming_impactful_events, is_news_time
-from trading_bot import check_and_execute_trading_cycle
+from trading_bot import check_and_execute_trading_cycle, last_scan_reports
 
 app = Flask(__name__)
 
@@ -95,6 +121,18 @@ def home():
 def backtest():
     """Serve the backtesting HTML page."""
     return render_template("backtest.html")
+
+
+@app.route('/portfolio')
+def portfolio():
+    """Serve the live portfolio summary report page."""
+    return render_template("portfolio.html")
+
+
+@app.route('/bot-status')
+def bot_status():
+    """Serve the bot status and activity console page."""
+    return render_template("bot_status.html")
 
 
 @app.route('/api/backtest', methods=['POST'])
@@ -558,9 +596,175 @@ def generate_backtest_chart():
         disconnect_mt5()
 
 
-# ============================================================
-#  API Routes
-# ============================================================
+@app.route('/api/mt5-symbols', methods=['GET'])
+def get_mt5_symbols():
+    """Fetch all available symbols from MT5 ending with 'm'."""
+    if not mt5.initialize(path=os.getenv("MT5_PATH", r"C:\Program Files\MetaTrader 5 EXNESS\terminal64.exe")):
+        return jsonify({"success": False, "error": "Could not connect to MT5"}), 500
+    try:
+        MT5_LOGIN = os.getenv("MT5_LOGIN")
+        MT5_PASSWORD = os.getenv("MT5_PASSWORD")
+        MT5_SERVER = os.getenv("MT5_SERVER")
+        if MT5_LOGIN and MT5_PASSWORD and MT5_SERVER:
+            mt5.login(login=int(MT5_LOGIN), password=MT5_PASSWORD, server=MT5_SERVER)
+            
+        # Curated list of desired symbols (Majors, Famous Crosses, Gold, Silver, Oil, Cryptos)
+        CURATED_SYMBOLS = [
+            # Majors
+            "EURUSDm", "GBPUSDm", "USDJPYm", "AUDUSDm", "USDCADm", "USDCHFm", "NZDUSDm",
+            # Famous Crosses
+            "EURGBPm", "EURJPYm", "GBPJPYm", "EURAUDm", "EURCADm", "EURCHFm", "EURNZDm", "GBPAUDm", "GBPCADm", "AUDJPYm",
+            # Metals
+            "XAUUSDm", "XAGUSDm",
+            # Oil
+            "USOILm", "UKOILm",
+            # Cryptos
+            "BTCUSDm", "ETHUSDm", "SOLUSDm", "BNBUSDm", "XRPUSDm", "LTCUSDm", "DOGEUSDm"
+        ]
+        
+        all_symbols = mt5.symbols_get()
+        if not all_symbols:
+            return jsonify({"success": True, "symbols": ["EURUSDm", "GBPUSDm", "USDJPYm"]})
+            
+        supported_names = {s.name for s in all_symbols}
+        curated_filtered = [sym for sym in CURATED_SYMBOLS if sym in supported_names]
+        
+        return jsonify({"success": True, "symbols": curated_filtered})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/portfolio-report', methods=['GET'])
+def get_portfolio_report():
+    """
+    Generate live portfolio statistics and historical trade summary by symbol.
+    """
+    is_connected = False
+    account_summary = {}
+    positions = []
+    
+    # 1. Connect and fetch live account details and active positions from MT5
+    if mt5.initialize(path=os.getenv("MT5_PATH", r"C:\Program Files\MetaTrader 5 EXNESS\terminal64.exe")):
+        MT5_LOGIN = os.getenv("MT5_LOGIN")
+        MT5_PASSWORD = os.getenv("MT5_PASSWORD")
+        MT5_SERVER = os.getenv("MT5_SERVER")
+        
+        if MT5_LOGIN and MT5_PASSWORD and MT5_SERVER:
+            if mt5.login(login=int(MT5_LOGIN), password=MT5_PASSWORD, server=MT5_SERVER):
+                is_connected = True
+                acc = get_account_info()
+                if acc:
+                    account_summary = acc
+                pos_list = get_open_positions()
+                for p in pos_list:
+                    positions.append({
+                        "ticket": p.ticket,
+                        "symbol": p.symbol,
+                        "action": "BUY" if p.type == mt5.POSITION_TYPE_BUY else "SELL",
+                        "volume": p.volume,
+                        "profit": p.profit
+                    })
+                    
+    # 2. Get closed trades history from SQLite database
+    closed_trades = []
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT symbol, profit FROM trades WHERE status = 'CLOSED'")
+        closed_trades = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+    except Exception as e:
+        print(f"[PORTFOLIO API] Error reading closed trade history: {e}")
+        
+    # Get configured symbols from settings
+    settings = get_settings()
+    configured_symbols = settings.get("symbols", [])
+    
+    # Extract unique symbols from all sources
+    all_symbols = set(configured_symbols)
+    for p in positions:
+        all_symbols.add(p["symbol"])
+    for t in closed_trades:
+        all_symbols.add(t["symbol"])
+        
+    rows = []
+    total_active_trades = len(positions)
+    total_active_lots = sum(p["volume"] for p in positions)
+    total_active_profit = sum(p["profit"] for p in positions)
+    
+    total_closed_profit = sum(t["profit"] for t in closed_trades)
+    closed_wins = sum(1 for t in closed_trades if t["profit"] > 0)
+    closed_losses = sum(1 for t in closed_trades if t["profit"] <= 0)
+    overall_win_rate = (closed_wins / len(closed_trades) * 100.0) if len(closed_trades) > 0 else 0.0
+    
+    for symbol in sorted(all_symbols):
+        # Filter active positions for this symbol
+        sym_active = [p for p in positions if p["symbol"] == symbol]
+        sym_active_count = len(sym_active)
+        sym_active_lots = sum(p["volume"] for p in sym_active)
+        sym_active_profit = sum(p["profit"] for p in sym_active)
+        
+        # Filter closed trades for this symbol
+        sym_closed = [t for t in closed_trades if t["symbol"] == symbol]
+        sym_closed_wins = sum(1 for t in sym_closed if t["profit"] > 0)
+        sym_closed_losses = sum(1 for t in sym_closed if t["profit"] <= 0)
+        sym_closed_profit = sum(t["profit"] for t in sym_closed)
+        
+        rows.append({
+            "symbol": symbol,
+            "active_trades": sym_active_count,
+            "total_lots": sym_active_lots,
+            "floating_profit": round(sym_active_profit, 2),
+            "closed_wins": sym_closed_wins,
+            "closed_losses": sym_closed_losses,
+            "total_closed_profit": round(sym_closed_profit, 2)
+        })
+        
+    return jsonify({
+        "success": True,
+        "connected": is_connected,
+        "account": account_summary,
+        "summary": {
+            "total_active_trades": total_active_trades,
+            "total_active_lots": total_active_lots,
+            "total_active_profit": round(total_active_profit, 2),
+            "total_closed_profit": round(total_closed_profit, 2),
+            "overall_win_rate": round(overall_win_rate, 1)
+        },
+        "rows": rows
+    })
+
+
+@app.route('/api/bot-activity', methods=['GET'])
+def get_bot_activity():
+    """
+    Get live bot logs and the last scan report per symbol.
+    """
+    logs = []
+    if hasattr(sys.stdout, 'buffer'):
+        logs = list(sys.stdout.buffer)
+        
+    is_connected = False
+    if mt5.initialize(path=os.getenv("MT5_PATH", r"C:\Program Files\MetaTrader 5 EXNESS\terminal64.exe")):
+        MT5_LOGIN = os.getenv("MT5_LOGIN")
+        MT5_PASSWORD = os.getenv("MT5_PASSWORD")
+        MT5_SERVER = os.getenv("MT5_SERVER")
+        if MT5_LOGIN and MT5_PASSWORD and MT5_SERVER:
+            is_connected = bool(mt5.login(login=int(MT5_LOGIN), password=MT5_PASSWORD, server=MT5_SERVER))
+            
+    settings = get_settings()
+    auto_trade = int(settings.get("auto_trade", 1)) == 1
+    
+    return jsonify({
+        "success": True,
+        "logs": logs,
+        "scan_reports": last_scan_reports,
+        "last_scan_time": last_scan_time,
+        "scan_in_progress": scan_in_progress,
+        "mt5_connected": is_connected,
+        "auto_trade": auto_trade
+    })
+
 
 @app.route('/api/status', methods=['GET'])
 def get_status():
@@ -608,8 +812,8 @@ def get_status():
     history = get_trade_history(limit=20)
     
     # 3. Get upcoming news
-    upcoming_news = get_upcoming_impactful_events(minutes_before=60, minutes_after=30)
-    news_active, _ = is_news_time(minutes_before=60, minutes_after=30)
+    upcoming_news = get_upcoming_impactful_events(minutes_before=30, minutes_after=30)
+    news_active, _ = is_news_time(minutes_before=30, minutes_after=30)
 
     # 4. Get last scan time
     settings = get_settings()
@@ -725,6 +929,169 @@ def get_chart_data():
     return jsonify(history)
 
 
+@app.route('/api/icons-config', methods=['GET'])
+def get_icons_config():
+    """
+    Return the full icons catalogue with enabled/disabled status
+    for Trading Platforms, Financial Instruments, and Regulations.
+    """
+    # Master catalogue — all possible items
+    ALL_PLATFORMS = [
+        {"id": "mt5",         "name": "MetaTrader 5",  "icon": "fa-brands fa-windows",     "color": "#6c5ce7"},
+        {"id": "mt4",         "name": "MetaTrader 4",  "icon": "fa-brands fa-windows",     "color": "#a29bfe"},
+        {"id": "ctrader",     "name": "cTrader",        "icon": "fa-solid fa-c",             "color": "#00cec9"},
+        {"id": "tradingview", "name": "TradingView",    "icon": "fa-solid fa-chart-candlestick","color": "#2ecc71"},
+        {"id": "dxtrade",     "name": "DXtrade",        "icon": "fa-solid fa-d",             "color": "#f39c12"},
+        {"id": "matchtrader", "name": "Match-Trader",   "icon": "fa-solid fa-m",             "color": "#e17055"},
+    ]
+    ALL_INSTRUMENTS = [
+        {"id": "forex",       "name": "Forex",          "icon": "fa-solid fa-money-bill-transfer", "color": "#6c5ce7"},
+        {"id": "gold",        "name": "Gold (XAU)",     "icon": "fa-solid fa-coins",         "color": "#f1c40f"},
+        {"id": "crypto",      "name": "Crypto",         "icon": "fa-brands fa-bitcoin",      "color": "#f39c12"},
+        {"id": "oil",         "name": "Oil",            "icon": "fa-solid fa-oil-well",      "color": "#636e72"},
+        {"id": "silver",      "name": "Silver (XAG)",   "icon": "fa-solid fa-gem",           "color": "#b2bec3"},
+        {"id": "indices",     "name": "Stock Indices",  "icon": "fa-solid fa-chart-line",    "color": "#00cec9"},
+        {"id": "stocks",      "name": "Stocks",         "icon": "fa-solid fa-building-columns","color": "#55efc4"},
+        {"id": "commodities", "name": "Commodities",    "icon": "fa-solid fa-wheat-awn",     "color": "#fdcb6e"},
+    ]
+    ALL_REGULATIONS = [
+        {"id": "fca",   "name": "FCA",   "subtitle": "United Kingdom",    "icon": "fa-solid fa-shield-halved", "color": "#6c5ce7"},
+        {"id": "cysec", "name": "CySEC", "subtitle": "Cyprus",            "icon": "fa-solid fa-shield-halved", "color": "#0984e3"},
+        {"id": "asic",  "name": "ASIC",  "subtitle": "Australia",         "icon": "fa-solid fa-shield-halved", "color": "#00b894"},
+        {"id": "fsca",  "name": "FSCA",  "subtitle": "South Africa",      "icon": "fa-solid fa-shield-halved", "color": "#e17055"},
+        {"id": "cma",   "name": "CMA",   "subtitle": "Kenya",             "icon": "fa-solid fa-shield-halved", "color": "#fdcb6e"},
+        {"id": "fsa",   "name": "FSA",   "subtitle": "Seychelles",        "icon": "fa-solid fa-shield-halved", "color": "#a29bfe"},
+        {"id": "sfsa",  "name": "SFSA",  "subtitle": "St. Vincent",       "icon": "fa-solid fa-shield-halved", "color": "#55efc4"},
+        {"id": "vfsc",  "name": "VFSC",  "subtitle": "Vanuatu",           "icon": "fa-solid fa-shield-halved", "color": "#fd79a8"},
+    ]
+
+    settings = get_settings()
+    enabled_platforms    = settings.get("trading_platforms", [p["id"] for p in ALL_PLATFORMS])
+    enabled_instruments  = settings.get("financial_instruments", [i["id"] for i in ALL_INSTRUMENTS])
+    enabled_regulations  = settings.get("regulations", [r["id"] for r in ALL_REGULATIONS])
+
+    # Attach enabled flag to each item
+    for item in ALL_PLATFORMS:
+        item["enabled"] = item["id"] in enabled_platforms
+    for item in ALL_INSTRUMENTS:
+        item["enabled"] = item["id"] in enabled_instruments
+    for item in ALL_REGULATIONS:
+        item["enabled"] = item["id"] in enabled_regulations
+
+    return jsonify({
+        "success": True,
+        "trading_platforms":    ALL_PLATFORMS,
+        "financial_instruments": ALL_INSTRUMENTS,
+        "regulations":          ALL_REGULATIONS,
+    })
+
+
+@app.route('/chat')
+def chat_page():
+    """
+    Render the AI Analyst Chat interface.
+    """
+
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM trades ORDER BY open_time DESC LIMIT 15")
+        trades = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+    except Exception as e:
+        print(f"[CHAT PAGE] Error reading trade history: {e}")
+        trades = []
+    return render_template('chat.html', trades=trades)
+
+
+
+@app.route('/api/chat', methods=['POST'])
+def api_chat():
+    """
+    Handle chat messages with Gemini, injecting recent trades context.
+    """
+    try:
+        import google.generativeai as genai
+        import json
+        
+        data = request.get_json() or {}
+        user_message = data.get("message", "")
+        history = data.get("history", [])
+        
+        # 1. Fetch recent trades from DB for context
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM trades ORDER BY open_time DESC LIMIT 20")
+        trades = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        
+        # 2. Build trades context
+        trades_context = "RECENT TRADES LIST:\n"
+        for t in trades:
+            gann_data_str = ""
+            if t.get("gann_data"):
+                try:
+                    gd = json.loads(t["gann_data"])
+                    gann_data_str = f", Gann: Type={gd.get('type')}, Pivots (A={gd.get('A')}, B={gd.get('B')}, C={gd.get('C')}), Pullback={gd.get('retracement_pct', 0):.1f}%, TargetAngle={gd.get('target_angle')}°"
+                except Exception:
+                    pass
+            trades_context += (
+                f"- Ticket #{t['ticket']}, Symbol: {t['symbol']}, Action: {t['action']}, "
+                f"Volume: {t['volume']} lots, Entry Price: {t['entry_price']}, "
+                f"Close Price: {t['close_price'] or 'N/A'}, TP: {t['tp']}, SL: {t['sl']}, "
+                f"Profit: {t['profit']} USD, Open: {t['open_time']}, Close: {t['close_time'] or 'OPEN'}, "
+                f"Reason: {t['reason']}{gann_data_str}\n"
+            )
+            
+        # 3. System Instruction for Analyst
+        system_instruction = (
+            "You are a professional AI Trading Analyst Coach. The user is trading Forex and other assets using an MT5 bot powered by a Gann geometry strategy combined with a Gemini analysis filter.\n"
+            "Below is the history of the 20 most recent trades executed by the bot. Use this history to answer all user queries, analyze specific trades, and explain why trades were opened/closed:\n\n"
+            f"{trades_context}\n\n"
+            "Your instructions:\n"
+            "1. Answer the user's questions about these trades, active positions, and market operations.\n"
+            "2. Explain why trades were opened (referencing their reasons, Gann pivots A/B/C, Fibonacci retracement %, and angles) and why they were closed (e.g. hitting TP, SL, or Martingale grid averaging).\n"
+            "3. If a user asks about a specific trade, locate it in the list above using its ticket number, symbol, or open time.\n"
+            "4. Provide constructive feedback, stats (e.g. win rate, total profit/loss), and trade breakdown.\n"
+            "5. ALWAYS respond in the user's language (if they ask in Arabic, respond in Arabic; if English, respond in English). Keep your answers concise, clear, and professional."
+        )
+        
+        # 4. Initialize Gemini
+        GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+        if not GEMINI_API_KEY:
+            return jsonify({"success": False, "error": "GEMINI_API_KEY missing in server env"}), 500
+            
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel(
+            model_name="gemini-2.5-flash",
+            system_instruction=system_instruction
+        )
+        
+        # 5. Format history for Gemini chat API
+        gemini_history = []
+        for h in history:
+            role = h.get("role", "user")
+            text = h.get("text", "")
+            gemini_history.append({
+                "role": "user" if role == "user" else "model",
+                "parts": [text]
+            })
+            
+        chat = model.start_chat(history=gemini_history)
+        response = chat.send_message(user_message)
+        
+        return jsonify({
+            "success": True,
+            "response": response.text
+        })
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+
 # ============================================================
 #  Server Startup & Tear-down
 # ============================================================
@@ -735,13 +1102,37 @@ if __name__ == '__main__':
     bot_thread.daemon = True
     bot_thread.start()
     
+    # Start the Telegram listener thread
+    try:
+        from telegram_listener import start_telegram_listener
+        start_telegram_listener()
+    except Exception as tg_err:
+        print(f"[SERVER STARTUP] [ERROR] Failed to start Telegram listener: {tg_err}")
+    
     try:
         # Run Flask server
+        import socket
+        local_ip = "127.0.0.1"
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+        except Exception:
+            pass
+            
         print("\n" + "=" * 55)
-        print("🚀 WEB DASHBOARD RUNNING: http://127.0.0.1:5000")
+        print("🚀 WEB DASHBOARD RUNNING:")
+        print(f"   - Local:  http://127.0.0.1:5000")
+        print(f"   - Wi-Fi:  http://{local_ip}:5000 (Use on Mobile)")
         print("=" * 55 + "\n")
-        app.run(host='127.0.0.1', port=5000, debug=False)
+        app.run(host='0.0.0.0', port=5000, debug=False)
     finally:
-        # Stop background thread on server shutdown
+        # Stop background threads on server shutdown
         bot_running = False
         print("Stopping background bot thread...")
+        try:
+            from telegram_listener import stop_telegram_listener
+            stop_telegram_listener()
+        except Exception:
+            pass

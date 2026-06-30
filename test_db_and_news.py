@@ -87,7 +87,7 @@ def run_integration_test():
         raw_events = fetch_economic_events()
         print(f"[OK] Successfully fetched {len(raw_events)} events from TradingView.")
         
-        should_freeze, active_news = is_news_time(minutes_before=60, minutes_after=30)
+        should_freeze, active_news = is_news_time(minutes_before=30, minutes_after=30)
         print(f"\nShould freeze trading now? {'🚫 YES' if should_freeze else '✅ NO'}")
         
         if len(active_news) > 0:

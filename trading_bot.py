@@ -10,6 +10,7 @@ sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 import time
 import os
+import argparse
 import MetaTrader5 as mt5
 from dotenv import load_dotenv
 
@@ -31,6 +32,9 @@ from gann_helper import detect_market_structure, calculate_gann_levels
 load_dotenv()
 MAGIC_NUMBER = int(os.getenv("BOT_MAGIC", "20260604"))
 DEFAULT_TIMEFRAME = os.getenv("TRADING_TIMEFRAME", "H4")
+
+# Global dict to store the results of the last scanning cycle per symbol
+last_scan_reports = {}
 
 
 def calculate_lot_size(symbol, sl_price, entry_price, risk_percent=1.0):
@@ -77,6 +81,104 @@ def calculate_lot_size(symbol, sl_price, entry_price, risk_percent=1.0):
     return lot
 
 
+def check_technical_strategy_signals(df, symbol):
+    """
+    Computes technical indicators (EMA 50, EMA 200, RSI 14) and candlestick patterns,
+    returning a proposed trade direction ('BUY', 'SELL', or 'HOLD') and reason details.
+    """
+    import pandas as pd
+    
+    if len(df) < 200:
+        return "HOLD", f"Not enough candle data ({len(df)} candles, minimum 200 required for EMA 200)."
+
+    # 1. Calculate EMAs
+    df = df.copy()
+    df['ema50'] = df['Close'].ewm(span=50, adjust=False).mean()
+    df['ema200'] = df['Close'].ewm(span=200, adjust=False).mean()
+
+    # 2. Calculate RSI 14
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    df['rsi14'] = 100 - (100 / (1 + rs))
+
+    # We evaluate completed candle triggers on index -2 (completed candle)
+    # df.iloc[-1] is the current open/forming candle.
+    c_close = df['Close'].iloc[-2]
+    c_open = df['Open'].iloc[-2]
+    c_high = df['High'].iloc[-2]
+    c_low = df['Low'].iloc[-2]
+
+    prev_close = df['Close'].iloc[-3]
+    prev_open = df['Open'].iloc[-3]
+
+    # Candlestick Pattern Detection
+    # Engulfing
+    is_bullish_engulfing = (c_close > c_open) and (prev_close < prev_open) and (c_close >= prev_open) and (c_open <= prev_close)
+    is_bearish_engulfing = (c_close < c_open) and (prev_close > prev_open) and (c_close <= prev_open) and (c_open >= prev_close)
+
+    # Pin Bar (body in upper or lower 1/3 of the candle range, shadow is at least 50% of the range)
+    candle_range = c_high - c_low
+    body_size = abs(c_close - c_open)
+    upper_wick = c_high - max(c_open, c_close)
+    lower_wick = min(c_open, c_close) - c_low
+
+    is_bullish_pinbar = (candle_range > 0) and (lower_wick > candle_range * 0.5) and (upper_wick < candle_range / 3) and (body_size < candle_range * 0.35)
+    is_bearish_pinbar = (candle_range > 0) and (upper_wick > candle_range * 0.5) and (lower_wick < candle_range / 3) and (body_size < candle_range * 0.35)
+
+    # 3. Pullback Confirmation: Touch of EMA 50 within the last 3 completed candles (index -2, -3, -4)
+    pullback_buy = False
+    pullback_sell = False
+    for i in [-2, -3, -4]:
+        low_val = df['Low'].iloc[i]
+        high_val = df['High'].iloc[i]
+        ema50_val = df['ema50'].iloc[i]
+        if low_val <= ema50_val <= high_val:
+            pullback_buy = True
+            pullback_sell = True
+            break
+
+    # 4. RSI Range & Trend Filter
+    rsi_curr = df['rsi14'].iloc[-2]
+    rsi_prev = df['rsi14'].iloc[-3]
+
+    # For BUY: RSI must be between 45 and 60 AND rising
+    rsi_buy_ok = (45 <= rsi_curr <= 60) and (rsi_curr > rsi_prev)
+    # For SELL: RSI must be between 40 and 55 AND falling
+    rsi_sell_ok = (40 <= rsi_curr <= 55) and (rsi_curr < rsi_prev)
+
+    # 5. Trend Rules
+    macro_bullish = c_close > df['ema200'].iloc[-2]
+    macro_bearish = c_close < df['ema200'].iloc[-2]
+
+    inter_bullish = c_close > df['ema50'].iloc[-2]
+    inter_bearish = c_close < df['ema50'].iloc[-2]
+
+    # Evaluate BUY Setup
+    if macro_bullish and inter_bullish and pullback_buy and (is_bullish_engulfing or is_bullish_pinbar) and rsi_buy_ok:
+        pattern = "Bullish Engulfing" if is_bullish_engulfing else "Bullish Pin Bar"
+        return "BUY", f"Technical BUY setup triggered via {pattern}. EMA200 uptrend confirmed. EMA50 touch confirmed. RSI 14: {rsi_curr:.1f}."
+
+    # Evaluate SELL Setup
+    elif macro_bearish and inter_bearish and pullback_sell and (is_bearish_engulfing or is_bearish_pinbar) and rsi_sell_ok:
+        pattern = "Bearish Engulfing" if is_bearish_engulfing else "Bearish Pin Bar"
+        return "SELL", f"Technical SELL setup triggered via {pattern}. EMA200 downtrend confirmed. EMA50 touch confirmed. RSI 14: {rsi_curr:.1f}."
+
+    # Otherwise HOLD
+    reasons = []
+    if not (macro_bullish and inter_bullish) and not (macro_bearish and inter_bearish):
+        reasons.append("EMA trend alignment failed")
+    if not pullback_buy and not pullback_sell:
+        reasons.append("EMA50 pullback touch not detected in last 3 candles")
+    if not (is_bullish_engulfing or is_bullish_pinbar or is_bearish_engulfing or is_bearish_pinbar):
+        reasons.append("no engulfing or pin-bar pattern")
+    if not rsi_buy_ok and not rsi_sell_ok:
+        reasons.append(f"RSI 14 ({rsi_curr:.1f}) out of range/trend")
+
+    return "HOLD", "Technical Hold - " + " & ".join(reasons)
+
+
 def sync_db_with_mt5_positions():
     """
     Sync open positions from MT5 to SQLite database.
@@ -99,7 +201,7 @@ def sync_db_with_mt5_positions():
             profit = 0.0
             
             # Fetch from MT5 history to get actual closing stats
-            history_deals = mt5.history_deals_get(ticket=ticket)
+            history_deals = mt5.history_deals_get(position=ticket)
             if history_deals and len(history_deals) > 0:
                 # Find the deal that closed the position (usually DEAL_ENTRY_OUT)
                 for deal in history_deals:
@@ -111,6 +213,55 @@ def sync_db_with_mt5_positions():
             # Log as closed in database
             log_trade_close(ticket, close_price, profit)
             print(f"[SYNC] Closed position ticket {ticket} detected and logged in DB (Profit: ${profit})")
+            
+            # Send Telegram closed alert and update screenshot
+            result = "WIN" if profit >= 0 else "LOSS"
+            close_time_str = time.strftime('%Y-%m-%d %H:%M:%S')
+            screenshot_url = None
+            try:
+                from chart_generator import generate_chart_screenshot
+                from db_manager import update_trade_screenshot
+                import json
+                
+                gann_context = json.loads(db_trade["gann_data"]) if db_trade.get("gann_data") else None
+                
+                screenshot_url = generate_chart_screenshot(
+                    symbol=db_trade["symbol"],
+                    ticket=ticket,
+                    entry_price=db_trade["entry_price"],
+                    sl_price=db_trade["sl"],
+                    tp_price=db_trade["tp"],
+                    gann_data=gann_context,
+                    entry_time_str=db_trade["open_time"],
+                    exit_time_str=close_time_str,
+                    exit_price=close_price,
+                    result=result,
+                    profit_usd=profit
+                )
+                update_trade_screenshot(ticket, screenshot_url)
+                print(f"[SCREENSHOT] Updated closed trade chart to {screenshot_url}")
+            except Exception as ex:
+                print(f"[SCREENSHOT] [ERROR] Failed to update closed screenshot: {ex}")
+                
+            try:
+                from telegram_notifier import notify_trade_close
+                notify_trade_close(
+                    ticket=ticket,
+                    symbol=db_trade["symbol"],
+                    action=db_trade["action"],
+                    volume=db_trade["volume"],
+                    entry_price=db_trade["entry_price"],
+                    close_price=close_price,
+                    profit=profit,
+                    result=result,
+                    open_time=db_trade["open_time"],
+                    close_time=close_time_str,
+                    screenshot_url=screenshot_url,
+                    original_msg_id=db_trade.get("telegram_msg_id")
+                )
+                print(f"[TELEGRAM] Closed notification sent for ticket #{ticket}")
+            except Exception as tg_ex:
+                print(f"[TELEGRAM] [ERROR] Failed to send closed alert: {tg_ex}")
 
 
 def manage_active_positions_grid():
@@ -255,9 +406,11 @@ def check_and_execute_trading_cycle():
     """
     Executes a single scanning cycle across all symbols stored in the SQLite settings database.
     """
+    global last_scan_reports
     print("\n" + "=" * 60)
     print(f"🔄 STARTING SCANNING CYCLE: {time.strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
+    last_scan_reports.clear()
 
     # 1. Load Settings from SQLite Database
     settings = get_settings()
@@ -266,16 +419,27 @@ def check_and_execute_trading_cycle():
     max_positions = int(settings.get("max_positions", 2))
     auto_trade_enabled = int(settings.get("auto_trade", 1)) == 1
     news_filter_enabled = int(settings.get("news_filter", 1)) == 1
+    ai_evaluation_enabled = int(settings.get("ai_evaluation", 1)) == 1
+    fallback_to_technical = int(settings.get("fallback_to_technical", 1)) == 1
 
     print(f"[CONFIG] Symbols: {symbols_to_trade}")
     print(f"[CONFIG] Risk: {risk_percent}% per trade | Max Positions: {max_positions}")
     print(f"[CONFIG] Mode: {'AUTO-TRADE' if auto_trade_enabled else 'SIGNAL-ONLY (MANUAL)'}")
     print(f"[CONFIG] News Filter: {'ENABLED' if news_filter_enabled else 'DISABLED'}")
+    print(f"[CONFIG] AI Risk Evaluation: {'ENABLED' if ai_evaluation_enabled else 'DISABLED'}")
+    print(f"[CONFIG] Technical Fallback: {'ENABLED' if fallback_to_technical else 'DISABLED'}")
 
     # 2. Sync Positions & Log Balance Snapshot
     account_info = get_account_info()
     if not account_info:
         print("[ERROR] Could not fetch account info. Skipping cycle.")
+        for symbol in symbols_to_trade:
+            last_scan_reports[symbol] = {
+                "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                "status": "Error",
+                "details": "Could not fetch MetaTrader 5 account info.",
+                "structure": None
+            }
         return
 
     print(f"\n[ACCOUNT] Balance: {account_info['balance']} {account_info['currency']} | Equity: {account_info['equity']}")
@@ -299,17 +463,21 @@ def check_and_execute_trading_cycle():
     # Check Max Positions Limit
     if len(active_positions) >= max_positions:
         print("[RISK] Maximum positions reached. Skipping analysis to protect margin.")
+        for symbol in symbols_to_trade:
+            last_scan_reports[symbol] = {
+                "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                "status": "Skipped (Max Positions)",
+                "details": f"Maximum active positions reached ({len(active_positions)} / {max_positions}).",
+                "structure": None
+            }
         return
 
-    # Check Economic News Filter
+    # Fetch active news events if filter is enabled
+    active_news_events = []
     if news_filter_enabled:
-        should_freeze, active_news = is_news_time(minutes_before=60, minutes_after=30)
-        if should_freeze:
-            print("\n🚫 [NEWS FILTER] Trading is currently FROZEN due to upcoming economic news:")
-            for event in active_news:
-                print(f"  - [{event['importance']}] {event['currency']} - {event['title']} at {event['time']} (in {event['time_diff_minutes']} mins)")
-            print("Skipping cycle scan for new trades.")
-            return
+        _, active_news_events = is_news_time(minutes_before=30, minutes_after=30)
+        if active_news_events:
+            print(f"\n[NEWS FILTER] Detected {len(active_news_events)} active high-impact events. Checking symbol exposure...")
 
     # Keep track of symbols we already have open positions for
     open_symbols = [pos.symbol for pos in active_positions]
@@ -330,22 +498,65 @@ def check_and_execute_trading_cycle():
         # Skip if we already have an open trade for this symbol to prevent over-exposure
         if symbol in open_symbols:
             print(f"[SKIP] Already have an open position on {symbol}. Skipping to avoid double entry.")
+            last_scan_reports[symbol] = {
+                "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                "status": "Already Open",
+                "details": "Skipping symbol because there is already an active position on this pair.",
+                "structure": None
+            }
+            continue
+
+        # Check if this specific symbol contains any of the currently frozen news currencies
+        symbol_frozen = False
+        symbol_news_events = []
+        for event in active_news_events:
+            curr = event["currency"]
+            # e.g., if currency is "EUR", check if "EUR" is in symbol name "EURUSDm"
+            if curr.upper() in symbol.upper():
+                symbol_frozen = True
+                symbol_news_events.append(event)
+
+        if symbol_frozen:
+            print(f"\n🚫 [NEWS FILTER] Trading on {symbol} is currently FROZEN due to upcoming economic news:")
+            for event in symbol_news_events:
+                print(f"  - [{event['importance']}] {event['currency']} - {event['title']} at {event['time']} (in {event['time_diff_minutes']} mins)")
+            print(f"Skipping scan for {symbol}.")
+            events_desc = ", ".join([f"{e['currency']}: {e['title']}" for e in symbol_news_events])
+            last_scan_reports[symbol] = {
+                "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                "status": "News Frozen",
+                "details": f"Trading is frozen due to upcoming news events: {events_desc}",
+                "structure": None
+            }
             continue
 
         # Get current price
         price_info = get_current_price(symbol)
         if not price_info:
             print(f"[ERROR] Could not fetch price for {symbol}. Skipping.")
+            last_scan_reports[symbol] = {
+                "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                "status": "Error",
+                "details": "Could not fetch bid/ask price from MetaTrader 5.",
+                "structure": None
+            }
             continue
 
         # Fetch candles based on lookback
         gann_enabled = int(settings.get("gann_enabled", 1)) == 1
         gann_lookback = int(settings.get("gann_lookback", 100))
         gann_geometry = settings.get("gann_geometry", "square")
+        grid_enabled = int(settings.get("grid_enabled", 1)) == 1
 
         tf_constant = get_timeframe(DEFAULT_TIMEFRAME)
         if tf_constant is None:
             print(f"[ERROR] Invalid timeframe configuration: {DEFAULT_TIMEFRAME}")
+            last_scan_reports[symbol] = {
+                "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                "status": "Error",
+                "details": f"Invalid timeframe configuration: {DEFAULT_TIMEFRAME}",
+                "structure": None
+            }
             continue
 
         # Fetch count
@@ -353,17 +564,32 @@ def check_and_execute_trading_cycle():
         candles_df = get_candles(symbol=symbol, timeframe=tf_constant, count=count_to_fetch)
         if candles_df is None or len(candles_df) < 10:
             print(f"[ERROR] Not enough candle data for {symbol}. Skipping.")
+            last_scan_reports[symbol] = {
+                "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                "status": "Error",
+                "details": "Failed to fetch historical candle data from MetaTrader 5.",
+                "structure": None
+            }
             continue
 
         # Format candles for the AI model
         candles_text = format_candles_for_ai(candles_df, last_n=20)
 
-        # Detect market structure setup
+        # Determine technical signal in Python
+        proposed_action = "HOLD"
+        technical_reason = "No trade setup detected"
         gann_context = None
+
         if gann_enabled:
             setup = detect_market_structure(candles_df, lookback=gann_lookback)
             if not setup:
                 print(f"[INFO] No valid Gann + Fibonacci structure detected on {symbol}. Skipping analysis.")
+                last_scan_reports[symbol] = {
+                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                    "status": "No Setup",
+                    "details": f"No valid swing structure (Point A-B-C with 50-75% correction) detected within the last {gann_lookback} candles.",
+                    "structure": None
+                }
                 continue
 
             # Retracement percentage
@@ -390,19 +616,114 @@ def check_and_execute_trading_cycle():
                 "sl_price": dyn["sl_price"]
             }
             print(f"[GANN SETUP] Valid {setup['type']} structure: A={setup['A']}, B={setup['B']}, C={setup['C']} (Retracement: {retr_pct:.1f}%)")
+            proposed_action = setup["type"]
+            technical_reason = f"Gann breakout {proposed_action} pivot setup."
+        else:
+            proposed_action, technical_reason = check_technical_strategy_signals(candles_df, symbol)
 
-        # Run AI analysis
-        ai_result = engine.analyze_market(
-            symbol=symbol,
-            timeframe=DEFAULT_TIMEFRAME,
-            candles_data=candles_text,
-            account_info=account_info,
-            current_price=price_info,
-            gann_context=gann_context
-        )
+        # If technical strategy indicates HOLD, do not execute
+        if proposed_action == "HOLD":
+            print(f"[INFO] {symbol}: {technical_reason}")
+            last_scan_reports[symbol] = {
+                "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                "status": "No Setup",
+                "details": technical_reason,
+                "structure": gann_context
+            }
+            continue
 
-        decision = ai_result.get("decision", "HOLD")
-        trade_params = ai_result.get("trade_params")
+        print(f"🎯 [TECHNICAL TRIGGER] Generated {proposed_action} signal for {symbol}. Reason: {technical_reason}")
+
+        # Run AI analysis (if enabled) or bypass
+        decision = "HOLD"
+        trade_params = None
+        reasoning = ""
+
+        if ai_evaluation_enabled:
+            try:
+                ai_result = engine.analyze_market(
+                    symbol=symbol,
+                    timeframe=DEFAULT_TIMEFRAME,
+                    candles_data=candles_text,
+                    account_info=account_info,
+                    current_price=price_info,
+                    gann_context=gann_context,
+                    active_positions=active_positions,
+                    proposed_action=proposed_action
+                )
+                decision = ai_result.get("decision", "HOLD")
+                if decision == "ERROR":
+                    raise Exception(ai_result.get("analysis", "Gemini API call failed"))
+                if decision in ["APPROVE", "BUY", "SELL"]:
+                    decision = proposed_action
+                else:
+                    decision = "HOLD"
+                trade_params = ai_result.get("trade_params")
+                reasoning = ai_result.get("reasoning", ai_result.get("reason", "HOLD - AI rejected proposed trade"))
+            except Exception as e:
+                print(f"[ERROR] AI analysis failed for {symbol}: {e}")
+                if fallback_to_technical:
+                    print(f"[FALLBACK] Gemini API call failed. Falling back to pure technical execution!")
+                    decision = proposed_action
+                    
+                    # Calculate default SL/TP (20 pips / 30 pips) if not overridden later
+                    symbol_info = mt5.symbol_info(symbol)
+                    entry_price = price_info['ask'] if proposed_action == "BUY" else price_info['bid']
+                    pip_size = 0.01 if (symbol.upper().endswith("JPY") or "JPY" in symbol.upper()) else 0.0001
+                    sl = entry_price - (20.0 * pip_size) if proposed_action == "BUY" else entry_price + (20.0 * pip_size)
+                    tp = entry_price + (30.0 * pip_size) if proposed_action == "BUY" else entry_price - (30.0 * pip_size)
+                    if symbol_info:
+                        sl = round(sl, symbol_info.digits)
+                        tp = round(tp, symbol_info.digits)
+                        
+                    trade_params = {
+                        "action": proposed_action,
+                        "symbol": symbol,
+                        "volume": 0.01,
+                        "sl": sl,
+                        "tp": tp,
+                        "reason": f"Fallback: {technical_reason}"
+                    }
+                    reasoning = f"Gemini API error ({str(e)}). Executing technical fallback: {proposed_action}. Details: {technical_reason}"
+                else:
+                    last_scan_reports[symbol] = {
+                        "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                        "status": "Error",
+                        "details": f"Gemini AI API call failed: {str(e)} and fallback is disabled.",
+                        "structure": gann_context
+                    }
+                    continue
+        else:
+            print("[INFO] AI Risk Evaluation disabled. Executing purely based on technical strategy.")
+            decision = proposed_action
+            
+            # Calculate default SL/TP (20 pips / 30 pips) if not overridden later
+            symbol_info = mt5.symbol_info(symbol)
+            entry_price = price_info['ask'] if proposed_action == "BUY" else price_info['bid']
+            pip_size = 0.01 if (symbol.upper().endswith("JPY") or "JPY" in symbol.upper()) else 0.0001
+            sl = entry_price - (20.0 * pip_size) if proposed_action == "BUY" else entry_price + (20.0 * pip_size)
+            tp = entry_price + (30.0 * pip_size) if proposed_action == "BUY" else entry_price - (30.0 * pip_size)
+            if symbol_info:
+                sl = round(sl, symbol_info.digits)
+                tp = round(tp, symbol_info.digits)
+                
+            trade_params = {
+                "action": proposed_action,
+                "symbol": symbol,
+                "volume": 0.01,
+                "sl": sl,
+                "tp": tp,
+                "reason": f"Pure Technical: {technical_reason}"
+            }
+            reasoning = f"Executed pure technical signal: {proposed_action}. Details: {technical_reason}"
+
+        # Initialize default report status
+        last_scan_reports[symbol] = {
+            "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+            "status": f"AI Approved ({decision})" if ai_evaluation_enabled else f"Technical ({decision})",
+            "details": reasoning,
+            "structure": gann_context
+        }
 
         # 4. Handle decision
         if decision in ["BUY", "SELL"] and trade_params:
@@ -423,7 +744,6 @@ def check_and_execute_trading_cycle():
                 # Override SL and TP from database settings
                 sl = entry_price - (grid_sl * pip_size) if decision == "BUY" else entry_price + (grid_sl * pip_size)
                 tp = entry_price + (grid_tp * pip_size) if decision == "BUY" else entry_price - (grid_tp * pip_size)
-                # Round
                 sl = round(sl, symbol_info.digits)
                 tp = round(tp, symbol_info.digits)
                 print(f"[GRID OVERRIDE] Enforcing grid parameters. SL: {sl} ({grid_sl} pips), TP: {tp} ({grid_tp} pips)")
@@ -443,7 +763,10 @@ def check_and_execute_trading_cycle():
             entry_price = price_info['ask'] if decision == "BUY" else price_info['bid']
             
             if sl <= 0:
-                print(f"[REJECT] Trade rejected: Stop Loss is mandatory but was not specified (SL: {sl})")
+                reject_msg = f"Trade rejected: Stop Loss is mandatory but was not specified (SL: {sl})"
+                print(f"[REJECT] {reject_msg}")
+                last_scan_reports[symbol]["status"] = "AI Rejection"
+                last_scan_reports[symbol]["details"] = reject_msg
                 continue
 
             # --- RISK/REWARD (R:R) RATIO CHECK ---
@@ -451,13 +774,19 @@ def check_and_execute_trading_cycle():
             tp_distance = abs(tp - entry_price)
             
             if sl_distance <= 0:
-                print("[REJECT] Trade rejected: Stop Loss is at or ahead of entry price.")
+                reject_msg = "Trade rejected: Stop Loss is at or ahead of entry price."
+                print(f"[REJECT] {reject_msg}")
+                last_scan_reports[symbol]["status"] = "AI Rejection"
+                last_scan_reports[symbol]["details"] = reject_msg
                 continue
                 
             rr_ratio = tp_distance / sl_distance
             min_rr_ratio = float(settings.get("min_rr_ratio", 1.0) if gann_enabled else settings.get("min_rr_ratio", 1.5))
             if rr_ratio < min_rr_ratio:
-                print(f"[REJECT] Trade rejected: Risk/Reward ratio is 1:{rr_ratio:.2f} (must be at least 1:{min_rr_ratio:.2f})")
+                reject_msg = f"Trade rejected: Risk/Reward ratio is 1:{rr_ratio:.2f} (must be at least 1:{min_rr_ratio:.2f})"
+                print(f"[REJECT] {reject_msg}")
+                last_scan_reports[symbol]["status"] = "AI Rejection"
+                last_scan_reports[symbol]["details"] = reject_msg
                 continue
                 
             print(f"[OK] Risk validation passed: Risk/Reward ratio is 1:{rr_ratio:.2f}")
@@ -467,7 +796,10 @@ def check_and_execute_trading_cycle():
             print(f"[LOTS] Calculated Dynamic Lot: {volume} lots (risking {risk_percent}% of balance)")
 
             if not auto_trade_enabled:
-                print(f"[MANUAL] Signal-Only Mode: Trade was NOT executed. Signal: {decision} on {symbol}")
+                manual_msg = f"Signal-Only Mode: Trade was NOT executed. Signal: {decision} on {symbol} at {entry_price} (SL: {sl}, TP: {tp})"
+                print(f"[MANUAL] {manual_msg}")
+                last_scan_reports[symbol]["status"] = "Signal Only"
+                last_scan_reports[symbol]["details"] = manual_msg
                 continue
 
             # Execute Trade
@@ -483,6 +815,7 @@ def check_and_execute_trading_cycle():
 
             # Log to SQLite DB
             if trade_res and trade_res["success"]:
+                entry_time_str = time.strftime('%Y-%m-%d %H:%M:%S')
                 log_trade_open(
                     ticket=trade_res["ticket"],
                     symbol=symbol,
@@ -496,7 +829,12 @@ def check_and_execute_trading_cycle():
                 )
                 print(f"[DB] Trade ticket {trade_res['ticket']} logged successfully in SQLite.")
                 
+                exec_msg = f"Trade executed: {decision} {volume} lots at {trade_res['price']} (SL: {sl}, TP: {tp}). Ticket: {trade_res['ticket']}."
+                last_scan_reports[symbol]["status"] = f"Executed {decision}"
+                last_scan_reports[symbol]["details"] = exec_msg
+                
                 # Generate and save chart screenshot
+                screenshot_url = None
                 try:
                     from chart_generator import generate_chart_screenshot
                     from db_manager import update_trade_screenshot
@@ -507,15 +845,100 @@ def check_and_execute_trading_cycle():
                         entry_price=trade_res["price"],
                         sl_price=sl,
                         tp_price=tp,
-                        gann_data=gann_context
+                        gann_data=gann_context,
+                        entry_time_str=entry_time_str
                     )
                     update_trade_screenshot(trade_res["ticket"], screenshot_url)
                     print(f"[SCREENSHOT] Saved trade chart to {screenshot_url}")
                 except Exception as ex:
                     print(f"[SCREENSHOT] [ERROR] Failed to save screenshot: {ex}")
+                    
+                # Telegram notification
+                try:
+                    from telegram_notifier import notify_trade_open
+                    from db_manager import update_trade_telegram_msg_id
+                    
+                    msg_id = notify_trade_open(
+                        ticket=trade_res["ticket"],
+                        symbol=symbol,
+                        action=decision,
+                        volume=volume,
+                        entry_price=trade_res["price"],
+                        sl=sl,
+                        tp=tp,
+                        reason=reason,
+                        screenshot_url=screenshot_url
+                    )
+                    if msg_id:
+                        update_trade_telegram_msg_id(trade_res["ticket"], msg_id)
+                        print(f"[TELEGRAM] Trade open notification sent (Msg ID: {msg_id})")
+                except Exception as tg_ex:
+                    print(f"[TELEGRAM] [ERROR] Failed to send open alert: {tg_ex}")
+            else:
+                fail_msg = f"Failed to execute trade order in MetaTrader 5."
+                print(f"[ERROR] {fail_msg}")
+                last_scan_reports[symbol]["status"] = "Execution Fail"
+                last_scan_reports[symbol]["details"] = fail_msg
         else:
             print(f"\n➡️ [AI DECISION] {decision}")
-            print(f"  Reasoning: {ai_result.get('analysis', '')[:300]}")
+            print(f"  Reasoning: {reasoning[:300]}")
+
+    # Fetch latest open positions for the report
+    try:
+        latest_active = get_open_positions()
+    except Exception:
+        latest_active = []
+
+    # Print Live Portfolio Summary Report
+    print("\n" + "=" * 90)
+    print("                       LIVE PORTFOLIO SUMMARY REPORT")
+    print("=" * 90)
+    
+    # 1. Active Positions Table
+    active_by_symbol = {}
+    for pos in latest_active:
+        sym = pos.symbol
+        if sym not in active_by_symbol:
+            active_by_symbol[sym] = {"count": 0, "lots": 0.0, "profit": 0.0}
+        active_by_symbol[sym]["count"] += 1
+        active_by_symbol[sym]["lots"] += pos.volume
+        active_by_symbol[sym]["profit"] += pos.profit
+
+    # 2. Historical stats from SQLite
+    try:
+        from db_manager import get_trade_history
+        all_history = get_trade_history(limit=500) # get recent 500 trades
+    except Exception:
+        all_history = []
+        
+    hist_by_symbol = {}
+    for trade in all_history:
+        if trade.get("status") == "CLOSED":
+            sym = trade.get("symbol")
+            if sym not in hist_by_symbol:
+                hist_by_symbol[sym] = {"wins": 0, "losses": 0, "profit": 0.0}
+            profit_val = float(trade.get("profit") or 0.0)
+            if profit_val >= 0:
+                hist_by_symbol[sym]["wins"] += 1
+            else:
+                hist_by_symbol[sym]["losses"] += 1
+            hist_by_symbol[sym]["profit"] += profit_val
+
+    print(f"{'Symbol':<12} | {'Active Trades':<13} | {'Total Lots':<10} | {'Floating P/L':<12} | {'Closed Wins/Losses':<18} | {'Total Closed P/L':<16}")
+    print("-" * 90)
+    
+    for sym in symbols_to_trade:
+        active = active_by_symbol.get(sym, {"count": 0, "lots": 0.0, "profit": 0.0})
+        hist = hist_by_symbol.get(sym, {"wins": 0, "losses": 0, "profit": 0.0})
+        
+        active_str = f"{active['count']} trades"
+        lots_str = f"{active['lots']:.2f}"
+        floating_str = f"${active['profit']:+.2f}"
+        win_loss_str = f"{hist['wins']}W / {hist['losses']}L"
+        closed_profit_str = f"${hist['profit']:+.2f}"
+        
+        print(f"{sym:<12} | {active_str:<13} | {lots_str:<10} | {floating_str:<12} | {win_loss_str:<18} | {closed_profit_str:<16}")
+    print("=" * 90)
 
     print("\n" + "=" * 60)
     print("🔄 SCANNING CYCLE COMPLETED")
@@ -523,8 +946,16 @@ def check_and_execute_trading_cycle():
 
 
 def main():
+    parser = argparse.ArgumentParser(description="AI Algorithmic Trading Bot Daemon")
+    parser.add_argument("--loop", action="store_true", help="Run in a continuous loop")
+    parser.add_argument("--interval", type=int, default=300, help="Interval between scanning cycles in seconds")
+    args = parser.parse_args()
+
     print("=" * 60)
     print("          AI ALGORITHMIC TRADING BOT")
+    print(f"  Mode: {'Continuous Loop' if args.loop else 'Single Scan'}")
+    if args.loop:
+        print(f"  Interval: {args.interval} seconds")
     print("============================================================\n")
 
     # Connect to MT5
@@ -533,8 +964,21 @@ def main():
         sys.exit(1)
 
     try:
-        # Run a single scanning cycle on startup
-        check_and_execute_trading_cycle()
+        if args.loop:
+            while True:
+                # Ensure connection is active
+                if mt5.terminal_info() is None or mt5.account_info() is None:
+                    print("[WARNING] Connection lost. Attempting to reconnect...")
+                    if not connect_mt5():
+                        print("[ERROR] Reconnection failed. Retrying next cycle.")
+                        time.sleep(min(30, args.interval))
+                        continue
+                
+                check_and_execute_trading_cycle()
+                print(f"\n[LOOP] Sleeping for {args.interval} seconds...")
+                time.sleep(args.interval)
+        else:
+            check_and_execute_trading_cycle()
         
     except KeyboardInterrupt:
         print("\n[INFO] Bot stopped by user.")

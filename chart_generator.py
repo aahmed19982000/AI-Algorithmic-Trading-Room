@@ -7,7 +7,7 @@ import pandas as pd
 import MetaTrader5 as mt5
 from datetime import datetime, timedelta
 
-def generate_chart_screenshot(symbol, ticket, entry_price, sl_price, tp_price, gann_data=None, timeframe_str="M30"):
+def generate_chart_screenshot(symbol, ticket, entry_price, sl_price, tp_price, gann_data=None, timeframe_str="M30", entry_time_str=None, exit_time_str=None, exit_price=None, result=None, profit_usd=None):
     """
     Fetches historical candle data from MT5 and plots the candlesticks along with
     Entry, TP, and SL horizontal lines, and highlights the Gann A-B-C pivot structure.
@@ -36,7 +36,7 @@ def generate_chart_screenshot(symbol, ticket, entry_price, sl_price, tp_price, g
     tf_mins = get_tf_mins(timeframe_str)
     rates = None
     
-    # Try to fetch range starting from Point A to now
+    # Try to fetch range starting from Point A to now (or exit time if closed)
     if gann_data and gann_data.get("time_A"):
         try:
             time_A_dt = datetime.strptime(gann_data["time_A"], "%Y-%m-%d %H:%M:%S")
@@ -47,7 +47,15 @@ def generate_chart_screenshot(symbol, ticket, entry_price, sl_price, tp_price, g
     else:
         start_date = datetime.now() - timedelta(minutes=tf_mins * 300)
         
-    end_date = datetime.now() + timedelta(minutes=tf_mins * 20)
+    if exit_time_str:
+        try:
+            exit_dt = datetime.strptime(exit_time_str, "%Y-%m-%d %H:%M:%S")
+            end_date = exit_dt + timedelta(minutes=tf_mins * 20)
+        except Exception:
+            end_date = datetime.now() + timedelta(minutes=tf_mins * 20)
+    else:
+        end_date = datetime.now() + timedelta(minutes=tf_mins * 20)
+        
     rates = mt5.copy_rates_range(symbol, tf, start_date, end_date)
             
     if rates is None or len(rates) == 0:
@@ -80,7 +88,11 @@ def generate_chart_screenshot(symbol, ticket, entry_price, sl_price, tp_price, g
         return None
 
     # Resolve entry and swing pivot indices on the uncropped dataframe
-    idx_entry_uncropped = len(df) - 1
+    idx_entry_uncropped = get_idx_of_time(df, entry_time_str) if entry_time_str else len(df) - 1
+    if idx_entry_uncropped is None or idx_entry_uncropped < 0:
+        idx_entry_uncropped = len(df) - 1
+        
+    idx_exit_uncropped = get_idx_of_time(df, exit_time_str) if exit_time_str else None
     
     idx_A_uncropped = None
     idx_B_uncropped = None
@@ -151,6 +163,7 @@ def generate_chart_screenshot(symbol, ticket, entry_price, sl_price, tp_price, g
     idx_B = idx_B_uncropped - crop_offset if idx_B_uncropped is not None else None
     idx_C = idx_C_uncropped - crop_offset if idx_C_uncropped is not None else None
     idx_entry = idx_entry_uncropped - crop_offset if idx_entry_uncropped is not None else None
+    idx_exit = idx_exit_uncropped - crop_offset if idx_exit_uncropped is not None else None
     
     # 2. Setup directory
     static_dir = os.path.join(os.getcwd(), 'static', 'screenshots')
@@ -266,6 +279,31 @@ def generate_chart_screenshot(symbol, ticket, entry_price, sl_price, tp_price, g
             pivot_pts = sorted(zip(pivots_x, pivots_y))
             px, py = zip(*pivot_pts)
             ax.plot(px, py, color='#9b59b6', linestyle='dotted', linewidth=1.5, zorder=4)
+
+    # 4. Plot Entry and Exit vertical lines and markers
+    if idx_entry is not None and idx_entry >= 0:
+        ax.axvline(x=idx_entry, color='#f1c40f', linestyle='--', linewidth=0.8, alpha=0.7)
+        trade_type = gann_data.get('type') if gann_data else 'BUY'
+        ax.plot(idx_entry, entry_price, marker='^' if trade_type == 'BUY' else 'v', 
+                color='#2ecc71' if trade_type == 'BUY' else '#e74c3c', markersize=8, zorder=6)
+        
+    if idx_exit is not None and idx_exit >= 0:
+        ax.axvline(x=idx_exit, color='#95a5a6', linestyle='--', linewidth=0.8, alpha=0.7)
+        exit_val = exit_price if exit_price else df.iloc[idx_exit]['Close']
+        ax.plot(idx_exit, exit_val, marker='o', 
+                color='#e74c3c' if result == 'LOSS' else '#2ecc71', markersize=6, zorder=6)
+
+    # 5. Draw outcome banner
+    if result:
+        result_color = '#2ecc71' if result == 'WIN' else '#e74c3c'
+        try:
+            prof_val = float(profit_usd)
+            result_text = f"Result: {result} (${prof_val:+.2f})"
+        except Exception:
+            result_text = f"Result: {result}"
+            
+        ax.text(0.02, 0.93, result_text, transform=ax.transAxes, color=result_color, 
+                fontsize=10, fontweight='bold', bbox=dict(facecolor='#1e272e', alpha=0.85, edgecolor=result_color, boxstyle='round,pad=0.4'))
 
     # Save again with annotations
     fig.savefig(filepath, dpi=150, bbox_inches='tight')

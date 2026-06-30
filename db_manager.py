@@ -52,13 +52,18 @@ Your role is to analyze current market data and make precise BUY or SELL decisio
 4. **Stop Loss (SL) Level:**
    - The Stop Loss must be placed exactly at the correction pivot C.
 
+## PORTFOLIO RISK CONTROL RULES (MANDATORY):
+1. **Total Drawdown Cap:** Calculate the total floating drawdown of all active positions. If the total floating loss exceeds **5.0%** of the account balance (i.e. total floating profit is negative and its absolute value is > 5.0% of the balance), you MUST reject any new entries and output "HOLD - Total portfolio drawdown exceeds 5.0% limit."
+2. **Correlation Limit:** Do not open a new position on a currency pair in the same direction (e.g., BUY) if there is already an active position on that same currency pair or a highly correlated currency pair (e.g. EURUSD and GBPUSD, or USDCHF and USDJPY inversely) that is currently in a drawdown.
+3. **Margin Safety Check:** Verify that the account's Margin Level (if active positions exist) is at least **300%**. If the current Margin Level is below 300%, you MUST reject any new entries and output "HOLD - Margin Level is below 300% safety threshold."
+
 ## RISK MANAGEMENT RULES:
 1. **Stop Loss (SL) is MANDATORY** - Never open a trade without a Stop Loss.
 2. **Volume:** Sizing will be calculated automatically by the bot based on your SL price. Do not calculate manually.
 
 ## EXECUTION RULES:
-- If a valid breakout trigger is active and verified, call `open_trade` immediately with the exact TP and SL levels.
-- If no setup is active, output "HOLD" and explain the current market state.
+- If a valid breakout trigger is active and verified, and all PORTFOLIO RISK CONTROL RULES are fully satisfied, call `open_trade` immediately with the exact TP and SL levels.
+- If no setup is active or if any risk rule is breached, output "HOLD" and explain the current state or reason for rejection.
 """
 
 def get_db_connection():
@@ -114,6 +119,13 @@ def init_db():
         cursor.execute("ALTER TABLE trades ADD COLUMN screenshot_url TEXT")
         conn.commit()
 
+    # Upgrade: Add telegram_msg_id column if it doesn't exist
+    try:
+        cursor.execute("SELECT telegram_msg_id FROM trades LIMIT 1")
+    except sqlite3.OperationalError:
+        cursor.execute("ALTER TABLE trades ADD COLUMN telegram_msg_id TEXT")
+        conn.commit()
+
     # 3. Balance Log Table
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS balance_log (
@@ -144,14 +156,35 @@ def init_db():
         "grid_tp": "20.0",
         "gann_enabled": "1",
         "gann_lookback": "100",
-        "gann_geometry": "square"
+        "gann_geometry": "square",
+        "telegram_enabled": "0",
+        "telegram_token": "",
+        "telegram_chat_id": "",
+        # Icon display settings
+        "trading_platforms": json.dumps(["mt5", "mt4", "ctrader", "tradingview", "dxtrade", "matchtrader"]),
+        "financial_instruments": json.dumps(["forex", "gold", "crypto", "oil", "silver", "indices", "stocks", "commodities"]),
+        "regulations": json.dumps(["fca", "cysec", "asic", "fsca", "cma", "fsa", "sfsa", "vfsc"])
     }
 
     for key, val in defaults.items():
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, val))
-    
+
+    # Ensure icon settings and new settings always exist (for databases created before this feature)
+    extra_keys = {
+        "trading_platforms": defaults["trading_platforms"],
+        "financial_instruments": defaults["financial_instruments"],
+        "regulations": defaults["regulations"],
+        "ai_evaluation": "1",
+        "fallback_to_technical": "1"
+    }
+    for key, def_val in extra_keys.items():
+        cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
+        if not cursor.fetchone():
+            cursor.execute("INSERT INTO settings (key, value) VALUES (?, ?)", (key, def_val))
+
     conn.commit()
     conn.close()
+
 
 
 # ============================================================
@@ -246,6 +279,15 @@ def update_trade_screenshot(ticket, screenshot_url):
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("UPDATE trades SET screenshot_url = ? WHERE ticket = ?", (screenshot_url, ticket))
+    conn.commit()
+    conn.close()
+
+
+def update_trade_telegram_msg_id(ticket, msg_id):
+    """Save the telegram message ID for a specific trade."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE trades SET telegram_msg_id = ? WHERE ticket = ?", (str(msg_id) if msg_id else None, ticket))
     conn.commit()
     conn.close()
 

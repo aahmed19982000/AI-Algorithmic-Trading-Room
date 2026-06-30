@@ -43,12 +43,12 @@ def fetch_economic_events():
         return []
 
 
-def get_upcoming_impactful_events(minutes_before=60, minutes_after=30):
+def get_upcoming_impactful_events(minutes_before=30, minutes_after=30):
     """
-    Filter economic events that are close to current time and are of medium/high impact.
+    Filter economic events that are close to current time and are of HIGH impact.
 
     Returns:
-        list: Upcoming/recent impactful events
+        list: Upcoming/recent high impact events
     """
     events = fetch_economic_events()
     active_events = []
@@ -58,8 +58,8 @@ def get_upcoming_impactful_events(minutes_before=60, minutes_after=30):
     
     for event in events:
         importance = event.get("importance", -1)
-        # We look for Medium (0) or High (1) importance events
-        if importance < 0:
+        # We only look for High (1) importance events
+        if importance != 1:
             continue
             
         currency = event.get("currency", "")
@@ -87,7 +87,7 @@ def get_upcoming_impactful_events(minutes_before=60, minutes_after=30):
                     "id": event.get("id"),
                     "title": event.get("title"),
                     "currency": currency,
-                    "importance": "HIGH" if importance == 1 else "MEDIUM",
+                    "importance": "HIGH",
                     "time": event_time.strftime('%Y-%m-%d %H:%M:%S UTC'),
                     "time_diff_minutes": round(time_diff, 1)
                 })
@@ -98,7 +98,7 @@ def get_upcoming_impactful_events(minutes_before=60, minutes_after=30):
     return active_events
 
 
-def is_news_time(minutes_before=60, minutes_after=30):
+def is_news_time(minutes_before=30, minutes_after=30):
     """
     Check if trading should be frozen due to upcoming/recent high impact news.
 
