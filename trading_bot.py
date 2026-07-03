@@ -202,6 +202,8 @@ def sync_db_with_mt5_positions():
             
             # Fetch from MT5 history to get actual closing stats
             history_deals = mt5.history_deals_get(position=ticket)
+            close_comment = ""
+            close_reason_code = 0
             if history_deals and len(history_deals) > 0:
                 # Find the deal that closed the position (usually DEAL_ENTRY_OUT)
                 for deal in history_deals:
@@ -209,7 +211,23 @@ def sync_db_with_mt5_positions():
                         # Use deal price and profit
                         close_price = deal.price
                         profit = deal.profit
+                        close_comment = getattr(deal, 'comment', '')
+                        close_reason_code = getattr(deal, 'reason', 0)
             
+            exit_reason = "Unknown Close (إغلاق لسبب غير معروف)"
+            if close_comment == "Gann Reversal Close":
+                exit_reason = "Gann Reversal Close (إغلاق بسبب انعكاس الاتجاه)"
+            elif close_comment == "Manual Web Close":
+                exit_reason = "Manual Web Close (إغلاق يدوي من لوحة التحكم للويب)"
+            elif close_reason_code == 3:
+                exit_reason = "Hit Stop Loss (ضرب الاستوب)"
+            elif close_reason_code == 4:
+                exit_reason = "Hit Take Profit (ضرب الهدف)"
+            elif close_reason_code == 0:
+                exit_reason = "Manual MT5 Close (إغلاق يدوي مباشر من تطبيق/منصة MT5)"
+            elif close_comment:
+                exit_reason = f"Closed: {close_comment}"
+
             # Log as closed in database
             log_trade_close(ticket, close_price, profit)
             print(f"[SYNC] Closed position ticket {ticket} detected and logged in DB (Profit: ${profit})")
@@ -257,7 +275,8 @@ def sync_db_with_mt5_positions():
                     open_time=db_trade["open_time"],
                     close_time=close_time_str,
                     screenshot_url=screenshot_url,
-                    original_msg_id=db_trade.get("telegram_msg_id")
+                    original_msg_id=db_trade.get("telegram_msg_id"),
+                    exit_reason=exit_reason
                 )
                 print(f"[TELEGRAM] Closed notification sent for ticket #{ticket}")
             except Exception as tg_ex:
@@ -495,16 +514,8 @@ def check_and_execute_trading_cycle():
         print(f"🔎 Scanning symbol: {symbol}")
         print(f"--------------------------------------------------")
 
-        # Skip if we already have an open trade for this symbol to prevent over-exposure
-        if symbol in open_symbols:
-            print(f"[SKIP] Already have an open position on {symbol}. Skipping to avoid double entry.")
-            last_scan_reports[symbol] = {
-                "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
-                "status": "Already Open",
-                "details": "Skipping symbol because there is already an active position on this pair.",
-                "structure": None
-            }
-            continue
+        # Note: We do not skip here anymore to allow detection of opposite reversal signals
+        # and closing of active trades. Double entry is prevented later before execution.
 
         # Check if this specific symbol contains any of the currently frozen news currencies
         symbol_frozen = False
@@ -725,6 +736,47 @@ def check_and_execute_trading_cycle():
             "structure": gann_context
         }
 
+        # Check active positions for this symbol to manage reversals and prevent double entries
+        symbol_positions = [pos for pos in active_positions if pos.magic == MAGIC_NUMBER and pos.symbol == symbol]
+        has_same_direction = False
+        has_opposite_direction = False
+        
+        if symbol_positions:
+            for pos in symbol_positions:
+                pos_type_str = "BUY" if pos.type == mt5.POSITION_TYPE_BUY else "SELL"
+                if pos_type_str == decision:
+                    has_same_direction = True
+                else:
+                    has_opposite_direction = True
+                    
+        # If opposite positions are active, close them (Reversal Close)
+        if decision in ["BUY", "SELL"] and has_opposite_direction:
+            print(f"[REVERSAL] Opposite signal ({decision}) detected on {symbol}. Closing opposite positions...")
+            for pos in symbol_positions:
+                pos_type_str = "BUY" if pos.type == mt5.POSITION_TYPE_BUY else "SELL"
+                if pos_type_str != decision:
+                    print(f"[REVERSAL] Closing position #{pos.ticket} ({pos_type_str})")
+                    close_res = close_position(ticket=pos.ticket, comment="Gann Reversal Close")
+                    if close_res:
+                        # Log closure to DB
+                        log_trade_close(pos.ticket, pos.price_current, pos.profit)
+                        print(f"[REVERSAL] Position #{pos.ticket} closed successfully.")
+                        
+            # Sync database / wait briefly to ensure MT5 updates active positions
+            time.sleep(0.5)
+            active_positions = get_open_positions()
+            open_symbols = [pos.symbol for pos in active_positions]
+            symbol_positions = [pos for pos in active_positions if pos.magic == MAGIC_NUMBER and pos.symbol == symbol]
+            has_opposite_direction = False
+            
+        # If we have active positions in the same direction, skip opening a new trade (Prevent Double Entry)
+        if decision in ["BUY", "SELL"] and has_same_direction:
+            skip_msg = f"Already have an active {decision} position on {symbol}. Skipping new entry to prevent double entry."
+            print(f"[SKIP] {skip_msg}")
+            last_scan_reports[symbol]["status"] = "Already Open"
+            last_scan_reports[symbol]["details"] = skip_msg
+            continue
+
         # 4. Handle decision
         if decision in ["BUY", "SELL"] and trade_params:
             print(f"\n🎯 [AI SIGNAL] Triggered {decision} on {symbol}")
@@ -867,7 +919,8 @@ def check_and_execute_trading_cycle():
                         sl=sl,
                         tp=tp,
                         reason=reason,
-                        screenshot_url=screenshot_url
+                        screenshot_url=screenshot_url,
+                        gann_context=gann_context
                     )
                     if msg_id:
                         update_trade_telegram_msg_id(trade_res["ticket"], msg_id)

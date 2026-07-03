@@ -1091,6 +1091,138 @@ def api_chat():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+@app.route('/api/evaluate-performance', methods=['GET', 'POST'])
+def api_evaluate_performance():
+    """
+    Fetch closed trade history, calculate statistics, find losing patterns,
+    and prompt Gemini to generate a read-only performance audit with solutions.
+    """
+    try:
+        import google.generativeai as genai
+        import json
+        
+        # 1. Fetch closed trades from database
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM trades WHERE status = 'CLOSED' ORDER BY close_time DESC")
+        closed_trades = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        
+        if not closed_trades:
+            return jsonify({
+                "success": True,
+                "response": "⚠️ لم يتم العثور على أي صفقات مغلقة في قاعدة البيانات حتى الآن لإجراء التقييم عليها."
+            })
+            
+        # 2. Calculate summary statistics
+        total_trades = len(closed_trades)
+        wins = [t for t in closed_trades if t['profit'] > 0]
+        losses = [t for t in closed_trades if t['profit'] <= 0]
+        
+        total_wins = len(wins)
+        total_losses = len(losses)
+        win_rate = (total_wins / total_trades) * 100.0 if total_trades > 0 else 0.0
+        
+        net_profit = sum(t['profit'] for t in closed_trades)
+        gross_profit = sum(t['profit'] for t in wins)
+        gross_loss = abs(sum(t['profit'] for t in losses))
+        
+        profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (99.99 if gross_profit > 0 else 1.0)
+        
+        # Symbol analysis
+        symbol_stats = {}
+        for t in closed_trades:
+            sym = t['symbol']
+            if sym not in symbol_stats:
+                symbol_stats[sym] = {"trades": 0, "wins": 0, "losses": 0, "profit": 0.0}
+            symbol_stats[sym]["trades"] += 1
+            symbol_stats[sym]["profit"] += t['profit']
+            if t['profit'] > 0:
+                symbol_stats[sym]["wins"] += 1
+            else:
+                symbol_stats[sym]["losses"] += 1
+                
+        # Format stats for AI context
+        stats_context = (
+            f"SUMMARY STATISTICS:\n"
+            f"- Total Closed Trades: {total_trades}\n"
+            f"- Wins: {total_wins} ({win_rate:.1f}% Win Rate)\n"
+            f"- Losses: {total_losses}\n"
+            f"- Net Profit: {net_profit:.2f} USD\n"
+            f"- Profit Factor: {profit_factor:.2f}\n"
+            f"PER-SYMBOL BREAKDOWN:\n"
+        )
+        for sym, s in symbol_stats.items():
+            sym_win_rate = (s["wins"] / s["trades"] * 100) if s["trades"] > 0 else 0.0
+            stats_context += f"  * {sym}: {s['trades']} trades, {s['wins']}W/{s['losses']}L ({sym_win_rate:.1f}% WR), Net Profit: {s['profit']:.2f} USD\n"
+            
+        # 3. Format detailed losing trades (up to 50 for depth without overflowing token context)
+        losing_trades = losses[:50]
+        losses_context = "RECENT LOSING TRADES DETAILS:\n"
+        for t in losing_trades:
+            gann_data_str = ""
+            if t.get("gann_data"):
+                try:
+                    gd = json.loads(t["gann_data"])
+                    gann_data_str = f", Gann: Type={gd.get('type')}, Pivots (A={gd.get('A')}, B={gd.get('B')}, C={gd.get('C')}), Retracement={gd.get('retracement_pct', 0):.1f}%, TargetAngle={gd.get('target_angle')}°"
+                except Exception:
+                    pass
+            losses_context += (
+                f"- Ticket #{t['ticket']}, Symbol: {t['symbol']}, Action: {t['action']}, "
+                f"Volume: {t['volume']} lots, Entry Price: {t['entry_price']}, Close Price: {t['close_price']}, "
+                f"Profit: {t['profit']} USD, Open Time: {t['open_time']}, Close Time: {t['close_time']}, "
+                f"Reason: {t['reason']}{gann_data_str}\n"
+            )
+            
+        # Get active settings for context
+        settings = get_settings()
+        settings_context = "CURRENT BOT CONFIGURATIONS:\n"
+        for k, v in settings.items():
+            if k not in ["telegram_token", "telegram_chat_id", "strategy_prompt"]: # hide secrets and long prompts
+                settings_context += f"- {k}: {v}\n"
+                
+        # 4. Prompt Gemini
+        system_instruction = (
+            "You are a professional Senior Quantitative Trading Auditor and Risk Coach. The user runs an MT5 trading bot utilizing a Gann pivot geometry breakout strategy combined with a Martingale grid scaling system.\n"
+            "Your task is to analyze the bot's overall trading performance, specifically focusing on its losing trades, to identify common patterns, operational mistakes, and structural errors that lead to losses.\n"
+            "Then, provide practical solutions and recommendations to optimize settings (e.g. adjusting grid sizes, disabling poorly performing currency pairs, refining Gann entries, avoiding high-impact news times).\n\n"
+            "CRITICAL INSTRUCTIONS:\n"
+            "1. You must NOT attempt to change any code, files, or settings. You are a READ-ONLY analyst. Keep all suggestions strictly as recommendations for the user to configure manually.\n"
+            "2. Focus heavily on identifying the specific errors in the provided list of losing trades. Categorize these errors (e.g., 'Martingale grid too aggressive', 'Trading during news', 'Bad Gann breakouts on specific pairs').\n"
+            "3. Present your report in beautiful, professional Arabic markdown. Use sections, bullet points, and highlight key terms (using bold/italics or tables).\n"
+            "4. Keep the tone constructive, analytical, and professional. Explain the math or logic behind your recommendations."
+        )
+        
+        prompt = (
+            f"Here is the bot's performance data:\n\n"
+            f"{stats_context}\n"
+            f"{settings_context}\n"
+            f"{losses_context}\n\n"
+            "Please perform the performance audit and provide the Arabic report now."
+        )
+        
+        GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+        if not GEMINI_API_KEY:
+            return jsonify({"success": False, "error": "GEMINI_API_KEY missing in server env"}), 500
+            
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel(
+            model_name="gemini-2.5-flash",
+            system_instruction=system_instruction
+        )
+        
+        response = model.generate_content(prompt)
+        
+        return jsonify({
+            "success": True,
+            "response": response.text
+        })
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
+
 
 # ============================================================
 #  Server Startup & Tear-down

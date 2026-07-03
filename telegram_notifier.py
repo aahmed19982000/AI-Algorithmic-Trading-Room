@@ -78,7 +78,7 @@ def edit_telegram_message_caption(token, chat_id, message_id, caption):
         print(f"[TELEGRAM] Exception in edit_telegram_message_caption: {e}")
         return None
 
-def notify_trade_open(ticket, symbol, action, volume, entry_price, sl, tp, reason, screenshot_url=None):
+def notify_trade_open(ticket, symbol, action, volume, entry_price, sl, tp, reason, screenshot_url=None, gann_context=None):
     """Sends an alert to Telegram that a new trade has been opened."""
     enabled, token, chat_id = get_telegram_config()
     if not enabled or not token or not chat_id:
@@ -86,6 +86,17 @@ def notify_trade_open(ticket, symbol, action, volume, entry_price, sl, tp, reaso
         return None
         
     emoji = "🟢" if action.upper() == "BUY" else "🔴"
+    
+    gann_details = ""
+    if gann_context:
+        gann_details = (
+            f"\n📐 *Gann Geometry (هندسة جان):*\n"
+            f"• *Entry Angle (زاوية الدخول):* `{gann_context.get('entry_angle', 'N/A')}°`\n"
+            f"• *Target Angle (زاوية الهدف):* `{gann_context.get('target_angle', 'N/A')}°`\n"
+            f"• *Structure (الهيكل):* `A={gann_context.get('A'):.5f} | B={gann_context.get('B'):.5f} | C={gann_context.get('C'):.5f}`\n"
+            f"• *Pullback (التصحيح):* `{gann_context.get('retracement_pct', 0):.1f}%`"
+        )
+
     caption = (
         f"🔔 *TRADE OPENED* {emoji}\n\n"
         f"• *Ticket:* `#{ticket}`\n"
@@ -93,9 +104,10 @@ def notify_trade_open(ticket, symbol, action, volume, entry_price, sl, tp, reaso
         f"• *Action:* `{action.upper()}`\n"
         f"• *Volume:* `{volume:.2f} Lots`\n"
         f"• *Entry Price:* `{entry_price:.5f}`\n"
-        f"• *Target Profit (TP):* `{tp:.5f}`\n"
-        f"• *Stop Loss (SL):* `{sl:.5f}`\n"
-        f"• *Reason:* `{reason}`"
+        f"• *Target Profit (TP) (الهدف):* `{tp:.5f}`\n"
+        f"• *Stop Loss (SL) (الستوب):* `{sl:.5f}`\n"
+        f"• *Reason (السبب):* `{reason}`"
+        f"{gann_details}"
     )
     
     # Resolve local screenshot file path
@@ -118,7 +130,7 @@ def notify_trade_open(ticket, symbol, action, volume, entry_price, sl, tp, reaso
         return res_json["result"]["message_id"]
     return None
 
-def notify_trade_close(ticket, symbol, action, volume, entry_price, close_price, profit, result, open_time, close_time, screenshot_url=None, original_msg_id=None):
+def notify_trade_close(ticket, symbol, action, volume, entry_price, close_price, profit, result, open_time, close_time, screenshot_url=None, original_msg_id=None, exit_reason=None):
     """Sends an alert that a trade has been closed, and updates the original message caption."""
     enabled, token, chat_id = get_telegram_config()
     if not enabled or not token or not chat_id:
@@ -126,6 +138,10 @@ def notify_trade_close(ticket, symbol, action, volume, entry_price, close_price,
         
     emoji = "🏆 WIN" if result == "WIN" else "❌ LOSS"
     profit_emoji = "💵" if profit >= 0 else "📉"
+    
+    exit_reason_str = ""
+    if exit_reason:
+        exit_reason_str = f"• *Exit Reason (سبب الإغلاق):* `{exit_reason}`\n"
     
     caption = (
         f"🏁 *TRADE CLOSED* ({emoji})\n\n"
@@ -136,6 +152,7 @@ def notify_trade_close(ticket, symbol, action, volume, entry_price, close_price,
         f"• *Entry Price:* `{entry_price:.5f}`\n"
         f"• *Close Price:* `{close_price:.5f}`\n"
         f"• *Profit/Loss:* `{profit_emoji} ${profit:+.2f} USD`\n"
+        f"{exit_reason_str}"
         f"• *Open Time:* `{open_time}`\n"
         f"• *Close Time:* `{close_time}`"
     )
@@ -151,6 +168,7 @@ def notify_trade_close(ticket, symbol, action, volume, entry_price, close_price,
     if original_msg_id:
         try:
             original_emoji = "🟢" if action.upper() == "BUY" else "🔴"
+            exit_reason_line = f"• *Reason:* `{exit_reason}`\n" if exit_reason else ""
             updated_orig_caption = (
                 f"📦 *[CLOSED - {result}] TRADE OPENED* {original_emoji}\n\n"
                 f"• *Ticket:* `#{ticket}`\n"
@@ -159,6 +177,7 @@ def notify_trade_close(ticket, symbol, action, volume, entry_price, close_price,
                 f"• *Volume:* `{volume:.2f} Lots`\n"
                 f"• *Entry Price:* `{entry_price:.5f}`\n"
                 f"• *Close Price:* `{close_price:.5f}`\n"
+                f"{exit_reason_line}"
                 f"• *Result:* `*{emoji} (${profit:+.2f})*`"
             )
             edit_telegram_message_caption(token, chat_id, original_msg_id, updated_orig_caption)

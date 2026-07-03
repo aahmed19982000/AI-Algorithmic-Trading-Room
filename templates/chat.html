@@ -540,9 +540,14 @@
                     <div class="panel-title">
                         <i class="fa-solid fa-comments"></i> AI Analyst Chat
                     </div>
-                    <button class="console-btn" onclick="clearChatHistory()" style="color: var(--danger-color); border: none; background: none; cursor: pointer; display: flex; align-items: center; gap: 5px;">
-                        <i class="fa-solid fa-trash-can"></i> <span class="badge-text" data-text="Clear Chat"></span>
-                    </button>
+                    <div style="display: flex; gap: 15px; align-items: center;">
+                        <button class="console-btn" onclick="runAiAudit()" style="color: var(--accent-color); border: none; background: none; cursor: pointer; display: flex; align-items: center; gap: 5px;">
+                            <i class="fa-solid fa-robot"></i> <span>تقييم أداء البوت (AI Audit)</span>
+                        </button>
+                        <button class="console-btn" onclick="clearChatHistory()" style="color: var(--danger-color); border: none; background: none; cursor: pointer; display: flex; align-items: center; gap: 5px;">
+                            <i class="fa-solid fa-trash-can"></i> <span class="badge-text" data-text="Clear Chat"></span>
+                        </button>
+                    </div>
                 </div>
                 <div class="chat-container">
                     <div class="chat-messages" id="chat-messages-container">
@@ -587,7 +592,78 @@
         // Load chat history from localStorage on load
         window.addEventListener('DOMContentLoaded', () => {
             loadHistoryFromStorage();
+            
+            // Check if we should trigger AI Audit on load
+            const urlParams = new URLSearchParams(window.location.search);
+            if (urlParams.get('trigger') === 'audit') {
+                // Clear the query param so refreshing doesn't re-trigger it
+                window.history.replaceState({}, document.title, window.location.pathname);
+                runAiAudit();
+            }
         });
+
+        // Trigger AI Audit of Bot Performance
+        async function runAiAudit() {
+            const inputField = document.getElementById('chat-user-input');
+            const sendBtn = document.getElementById('chat-send-btn');
+            const indicator = document.getElementById('chat-typing-indicator');
+            
+            const message = "يرجى تقييم أداء البوت ومراجعة الصفقات الخاسرة السابقة وتحديد الأخطاء وتقديم الحلول.";
+            
+            // Disable input and send button
+            inputField.disabled = true;
+            sendBtn.disabled = true;
+            
+            // Render user message
+            appendMessage('user', message);
+            
+            // Show typing indicator
+            indicator.style.display = 'flex';
+            
+            try {
+                const res = await fetch('/api/evaluate-performance', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                
+                if (!res.ok) {
+                    const text = await res.text();
+                    throw new Error(`Server status ${res.status}: ${text.substring(0, 150)}`);
+                }
+                
+                const data = await res.json();
+                
+                // Hide indicator
+                indicator.style.display = 'none';
+                
+                if (data.success) {
+                    // Render bot reply
+                    appendMessage('bot', data.response);
+                    
+                    // Save to history
+                    chatHistory.push({ role: 'user', text: message });
+                    chatHistory.push({ role: 'model', text: data.response });
+                    
+                    // Keep history brief
+                    if (chatHistory.length > 20) {
+                        chatHistory = chatHistory.slice(-20);
+                    }
+                    
+                    // Save to localStorage
+                    saveHistoryToStorage();
+                } else {
+                    appendMessage('bot', `⚠️ عفواً، حدث خطأ أثناء الاتصال بمحرك التقييم: ${data.error}`);
+                }
+            } catch (err) {
+                indicator.style.display = 'none';
+                appendMessage('bot', `⚠️ عفواً، فشل الاتصال بالخادم: ${err.message}`);
+                console.error(err);
+            } finally {
+                inputField.disabled = false;
+                sendBtn.disabled = false;
+                inputField.focus();
+            }
+        }
 
         function loadHistoryFromStorage() {
             try {
