@@ -375,15 +375,15 @@ def sync_db_with_mt5_positions():
                 print(f"[TELEGRAM] [ERROR] Failed to send closed alert: {tg_ex}")
 
 
-def check_m5_exit_signal(symbol, pos_type):
+def check_h1_exit_signal(symbol, pos_type):
     """
-    Checks if there is an exit signal on M5 timeframe:
-    - For BUY (0): returns True if a Lower Low (LL) is formed on M5, 
+    Checks if there is an exit signal on H1 timeframe:
+    - For BUY (0): returns True if a Lower Low (LL) is formed on H1, 
       where the new downward wave length is >= 25% larger than the previous, and the low is recent.
-    - For SELL (1): returns True if a Higher High (HH) is formed on M5,
+    - For SELL (1): returns True if a Higher High (HH) is formed on H1,
       where the new upward wave length is >= 25% larger than the previous, and the high is recent.
     """
-    df = get_candles(symbol=symbol, timeframe=mt5.TIMEFRAME_M5, count=60)
+    df = get_candles(symbol=symbol, timeframe=mt5.TIMEFRAME_H1, count=60)
     if df is None or len(df) < 15:
         return False
 
@@ -429,7 +429,7 @@ def check_m5_exit_signal(symbol, pos_type):
                         prev_wave = preceding_highs_prev[-1][1] - prev_val
                         
                         if prev_wave > 0 and latest_wave >= 1.25 * prev_wave:
-                            print(f"[M5 EXIT] BUY trade exit triggered: Recent Lower Low detected. "
+                            print(f"[H1 EXIT] BUY trade exit triggered: Recent Lower Low detected. "
                                   f"Latest Low: {latest_val:.5f} (Wave: {latest_wave:.5f}), "
                                   f"Prev Low: {prev_val:.5f} (Wave: {prev_wave:.5f}). "
                                   f"Wave length increased by {(latest_wave/prev_wave - 1)*100:.1f}%.")
@@ -453,7 +453,7 @@ def check_m5_exit_signal(symbol, pos_type):
                         prev_wave = prev_val - preceding_lows_prev[-1][1]
                         
                         if prev_wave > 0 and latest_wave >= 1.25 * prev_wave:
-                            print(f"[M5 EXIT] SELL trade exit triggered: Recent Higher High detected. "
+                            print(f"[H1 EXIT] SELL trade exit triggered: Recent Higher High detected. "
                                   f"Latest High: {latest_val:.5f} (Wave: {latest_wave:.5f}), "
                                   f"Prev High: {prev_val:.5f} (Wave: {prev_wave:.5f}). "
                                   f"Wave length increased by {(latest_wave/prev_wave - 1)*100:.1f}%.")
@@ -506,11 +506,11 @@ def manage_active_positions_tp_sl():
         if tp_dist <= 0:
             continue
 
-        # 1. Check M5 swing exit signal
-        if check_m5_exit_signal(symbol, pos_type):
-            exit_reason_ar = "تكوين قمة أعلى (للبيع) أو قاع أدنى (للشراء) على M5"
-            exit_reason_en = f"M5 {'Lower Low' if pos_type == 0 else 'Higher High'} Exit"
-            print(f"[M5 EXIT] Closing Position #{ticket} ({symbol}) due to M5 exit signal.")
+        # 1. Check H1 swing exit signal
+        if check_h1_exit_signal(symbol, pos_type):
+            exit_reason_ar = "تكوين قمة أعلى (للبيع) أو قاع أدنى (للشراء) على H1"
+            exit_reason_en = f"H1 {'Lower Low' if pos_type == 0 else 'Higher High'} Exit"
+            print(f"[H1 EXIT] Closing Position #{ticket} ({symbol}) due to H1 exit signal.")
             
             # Close the trade on MT5
             close_res = close_position(ticket=ticket, comment=exit_reason_en[:28])
