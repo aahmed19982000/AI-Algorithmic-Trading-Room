@@ -1264,10 +1264,22 @@
 
                 <!-- Collapsible Grid Settings -->
                 <div id="grid-settings-section" style="border-left: 2px dashed var(--accent-color); padding-left: 15px; margin-bottom: 20px; display: none;">
-                    <div class="form-group" style="margin-bottom: 10px;">
-                        <label for="grid-step">Grid Step (pips distance)</label>
-                        <input type="number" id="grid-step" min="5.0" max="100.0" step="1.0" value="10.0">
+                    <div style="font-weight: bold; color: var(--accent-color); font-size: 0.85rem; margin-bottom: 15px; display: flex; align-items: center; gap: 5px;">
+                        <i class="fa-solid fa-calculator"></i> Dynamic ATR & RSI Parameters
                     </div>
+
+                    <div class="form-group" style="margin-bottom: 10px;">
+                        <label for="grid-indicator-timeframe">Indicator Timeframe</label>
+                        <select id="grid-indicator-timeframe" style="width: 100%; padding: 8px; border-radius: 4px; background: rgba(0,0,0,0.2); color: var(--text-color); border: 1px solid var(--border-color);">
+                            <option value="M1">M1 (1 Minute)</option>
+                            <option value="M5" selected>M5 (5 Minutes)</option>
+                            <option value="M15">M15 (15 Minutes)</option>
+                            <option value="M30">M30 (30 Minutes)</option>
+                            <option value="H1">H1 (1 Hour)</option>
+                            <option value="H4">H4 (4 Hours)</option>
+                        </select>
+                    </div>
+
                     <div class="form-group" style="margin-bottom: 10px;">
                         <label for="grid-multiplier">Martingale Multiplier (x)</label>
                         <input type="number" id="grid-multiplier" min="1.0" max="3.0" step="0.1" value="2.0">
@@ -1276,18 +1288,45 @@
                         <label for="grid-max-legs">Max Recovery Levels (Legs)</label>
                         <input type="number" id="grid-max-legs" min="2" max="10" value="4">
                     </div>
+
+                    <!-- Dynamic ATR Spacing & Target Profit -->
                     <div class="form-group" style="margin-bottom: 10px;">
-                        <label for="grid-target-profit">Recovery Target Profit (pips)</label>
-                        <input type="number" id="grid-target-profit" min="0.5" max="20.0" step="0.5" value="2.0">
+                        <label for="grid-atr-multiplier">ATR Grid Step Multiplier</label>
+                        <input type="number" id="grid-atr-multiplier" min="0.5" max="5.0" step="0.1" value="1.5">
+                    </div>
+
+                    <div class="form-group" style="margin-bottom: 10px;">
+                        <label for="grid-target-profit-atr-multiplier">ATR Basket TP Multiplier</label>
+                        <input type="number" id="grid-target-profit-atr-multiplier" min="0.05" max="2.0" step="0.05" value="0.2">
+                    </div>
+
+                    <!-- Dynamic ATR SL/TP Multipliers (Hidden - Initial SL/TP driven by strategy) -->
+                    <input type="hidden" id="grid-initial-sl-atr-multiplier" value="1.5">
+                    <input type="hidden" id="grid-initial-tp-atr-multiplier" value="2.0">
+
+                    <div class="form-group" style="margin-bottom: 10px;">
+                        <label for="grid-basket-sl-atr-multiplier">Basket SL ATR Multiplier</label>
+                        <input type="number" id="grid-basket-sl-atr-multiplier" min="1.0" max="10.0" step="0.1" value="3.0">
+                    </div>
+
+                    <!-- RSI Filter Inputs -->
+                    <div class="form-group" style="margin-bottom: 10px;">
+                        <label for="grid-rsi-buy-max">RSI Max BUY Threshold</label>
+                        <input type="number" id="grid-rsi-buy-max" min="10.0" max="50.0" step="1.0" value="35.0">
                     </div>
                     <div class="form-group" style="margin-bottom: 10px;">
-                        <label for="grid-sl">Hard Basket Stop Loss (pips)</label>
-                        <input type="number" id="grid-sl" min="10.0" max="200.0" step="1.0" value="20.0">
+                        <label for="grid-rsi-sell-min">RSI Min SELL Threshold</label>
+                        <input type="number" id="grid-rsi-sell-min" min="50.0" max="90.0" step="1.0" value="65.0">
                     </div>
-                    <div class="form-group" style="margin-bottom: 10px;">
-                        <label for="grid-tp">Initial Take Profit (pips)</label>
-                        <input type="number" id="grid-tp" min="5.0" max="200.0" step="1.0" value="20.0">
-                    </div>
+
+                    <!-- Hidden old elements to avoid breaks in scripts -->
+                    <input type="hidden" id="grid-step" value="10.0">
+                    <input type="hidden" id="grid-sl" value="20.0">
+                    <input type="hidden" id="grid-tp" value="20.0">
+                    <input type="hidden" id="grid-target-profit" value="2.0">
+                    <input type="hidden" id="grid-min-safety-step" value="0.0">
+                    <input type="hidden" id="grid-min-target-profit-safety" value="0.0">
+                    <input type="hidden" id="grid-min-basket-sl-safety" value="0.0">
                 </div>
 
                 <div class="form-group">
@@ -2155,6 +2194,19 @@
                 document.getElementById('grid-sl').value = settings.grid_sl || 20.0;
                 document.getElementById('grid-tp').value = settings.grid_tp || 20.0;
 
+                // Load dynamic indicators settings
+                document.getElementById('grid-indicator-timeframe').value = settings.grid_indicator_timeframe || 'M5';
+                document.getElementById('grid-atr-multiplier').value = settings.grid_atr_multiplier || 1.5;
+                document.getElementById('grid-rsi-buy-max').value = settings.grid_rsi_buy_max || 35.0;
+                document.getElementById('grid-rsi-sell-min').value = settings.grid_rsi_sell_min || 65.0;
+                document.getElementById('grid-min-safety-step').value = settings.grid_min_safety_step || 5.0;
+                document.getElementById('grid-target-profit-atr-multiplier').value = settings.grid_target_profit_atr_multiplier || 0.2;
+                document.getElementById('grid-min-target-profit-safety').value = settings.grid_min_target_profit_safety || 2.0;
+                document.getElementById('grid-initial-sl-atr-multiplier').value = settings.grid_initial_sl_atr_multiplier || 1.5;
+                document.getElementById('grid-initial-tp-atr-multiplier').value = settings.grid_initial_tp_atr_multiplier || 2.0;
+                document.getElementById('grid-basket-sl-atr-multiplier').value = settings.grid_basket_sl_atr_multiplier || 3.0;
+                document.getElementById('grid-min-basket-sl-safety').value = settings.grid_min_basket_sl_safety || 10.0;
+
                 // Load Gann settings
                 const gannEnabled = settings.gann_enabled === 1;
                 document.getElementById('gann-enabled-toggle').checked = gannEnabled;
@@ -2287,6 +2339,18 @@
                 grid_target_profit: parseFloat(document.getElementById('grid-target-profit').value),
                 grid_sl: parseFloat(document.getElementById('grid-sl').value),
                 grid_tp: parseFloat(document.getElementById('grid-tp').value),
+                
+                grid_indicator_timeframe: document.getElementById('grid-indicator-timeframe').value,
+                grid_atr_multiplier: parseFloat(document.getElementById('grid-atr-multiplier').value),
+                grid_rsi_buy_max: parseFloat(document.getElementById('grid-rsi-buy-max').value),
+                grid_rsi_sell_min: parseFloat(document.getElementById('grid-rsi-sell-min').value),
+                grid_min_safety_step: parseFloat(document.getElementById('grid-min-safety-step').value),
+                grid_target_profit_atr_multiplier: parseFloat(document.getElementById('grid-target-profit-atr-multiplier').value),
+                grid_min_target_profit_safety: parseFloat(document.getElementById('grid-min-target-profit-safety').value),
+                grid_initial_sl_atr_multiplier: parseFloat(document.getElementById('grid-initial-sl-atr-multiplier').value),
+                grid_initial_tp_atr_multiplier: parseFloat(document.getElementById('grid-initial-tp-atr-multiplier').value),
+                grid_basket_sl_atr_multiplier: parseFloat(document.getElementById('grid-basket-sl-atr-multiplier').value),
+                grid_min_basket_sl_safety: parseFloat(document.getElementById('grid-min-basket-sl-safety').value),
                 
                 // Save Gann settings
                 gann_enabled: document.getElementById('gann-enabled-toggle').checked ? 1 : 0,
