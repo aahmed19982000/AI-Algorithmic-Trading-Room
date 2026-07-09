@@ -104,12 +104,36 @@ def run_backtest_gann(df, symbol, geometry='square', lookback=100, use_grid=True
         
     pip_multiplier = 1.0 / pip_size
     
-    # Grid parameters
-    grid_step = 10.0 # pips
-    grid_mult = 2.0
-    grid_max_legs = 4
-    grid_target_profit = 2.0 # pips
-    grid_sl = 20.0 # pips
+    # Load active database settings
+    try:
+        from db_manager import get_settings
+        settings = get_settings()
+    except Exception:
+        settings = {}
+        
+    grid_enabled = int(settings.get("grid_enabled", 1))
+    if not grid_enabled:
+        use_grid = False
+        
+    grid_mult = float(settings.get("grid_multiplier", 2.0))
+    grid_max_legs = int(settings.get("grid_max_legs", 4))
+    grid_use_atr = int(settings.get("grid_use_atr", 1))
+    grid_rsi_filter = int(settings.get("grid_rsi_filter", 1))
+    
+    # Fallback/default parameters if ATR is disabled
+    grid_step = float(settings.get("grid_step", 10.0)) 
+    grid_target_profit = float(settings.get("grid_target_profit", 2.0)) 
+    grid_sl = float(settings.get("grid_sl", 20.0)) 
+    
+    # Pre-calculate ATR(14) and RSI(14) indicators on the backtest data
+    df['range_pips'] = (df['High'] - df['Low']) * pip_multiplier
+    df['atr14'] = df['range_pips'].rolling(window=14).mean()
+    
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss.replace(0, 0.00001)
+    df['rsi14'] = 100.0 - (100.0 / (1.0 + rs))
     
     # Initial simulated balance for dynamic sizing
     sim_balance = 500.0
@@ -166,6 +190,7 @@ def run_backtest_gann(df, symbol, geometry='square', lookback=100, use_grid=True
         
         # --- Case A: Manage Active Trade Basket ---
         if len(basket) > 0:
+            entry_price = basket[0]["entry"]
             if basket_type == 'BUY':
                 # Check Stop Loss
                 if low_curr <= basket_sl:
@@ -191,10 +216,11 @@ def run_backtest_gann(df, symbol, geometry='square', lookback=100, use_grid=True
                     active_setup = None
                     continue
                     
-                # Check Take Profit
-                elif high_curr >= basket_tp:
-                    profit_usd = sum((basket_tp - leg["entry"]) * leg["vol"] for leg in basket) * contract_size
-                    total_pips = sum((basket_tp - leg["entry"]) * leg["vol"] for leg in basket) * pip_multiplier
+                # Check Take Profit (90% of TP distance as Close Early)
+                elif high_curr >= entry_price + (basket_tp - entry_price) * 0.90:
+                    tp_early = entry_price + (basket_tp - entry_price) * 0.90
+                    profit_usd = sum((tp_early - leg["entry"]) * leg["vol"] for leg in basket) * contract_size
+                    total_pips = sum((tp_early - leg["entry"]) * leg["vol"] for leg in basket) * pip_multiplier
                     total_vol = sum(leg["vol"] for leg in basket)
                     trades.append({
                         "type": "BUY",
@@ -206,7 +232,7 @@ def run_backtest_gann(df, symbol, geometry='square', lookback=100, use_grid=True
                         "profit_usd_raw": profit_usd,
                         "result": "WIN",
                         "sl_price": basket_sl,
-                        "tp_price": basket_tp,
+                        "tp_price": tp_early,
                         "gann_data": active_setup.copy() if active_setup else None
                     })
                     sim_balance += profit_usd
@@ -228,16 +254,41 @@ def run_backtest_gann(df, symbol, geometry='square', lookback=100, use_grid=True
                 if use_grid and len(basket) < grid_max_legs:
                     last_leg = basket[-1]
                     drawdown_pips = (last_leg["entry"] - low_curr) * pip_multiplier
-                    if drawdown_pips >= grid_step:
+                    
+                    atr_val = df.loc[i, 'atr14']
+                    rsi_val = df.loc[i, 'rsi14']
+                    if grid_use_atr and not pd.isna(atr_val):
+                        atr_mult = float(settings.get("grid_atr_multiplier", 1.5))
+                        current_grid_step = atr_val * atr_mult
+                    else:
+                        current_grid_step = grid_step
+                        
+                    rsi_allows = True
+                    if grid_rsi_filter and not pd.isna(rsi_val):
+                        rsi_buy_max = float(settings.get("grid_rsi_buy_max", 35.0))
+                        if rsi_val > rsi_buy_max:
+                            rsi_allows = False
+                            
+                    if drawdown_pips >= current_grid_step and rsi_allows:
                         # Deactivate Trailing stop once grid recovery starts
-                        next_entry = last_leg["entry"] - (grid_step * pip_size)
+                        next_entry = last_leg["entry"] - (current_grid_step * pip_size)
                         next_vol = round(last_leg["vol"] * grid_mult, 2)
                         basket.append({"entry": next_entry, "vol": next_vol})
                         
                         total_vol = sum(leg["vol"] for leg in basket)
                         avg_entry = sum(leg["entry"] * leg["vol"] for leg in basket) / total_vol
-                        basket_tp = avg_entry + (grid_target_profit * pip_size)
-                        basket_sl = basket_initial_sl # Stop Loss remains at Point A
+                        
+                        if grid_use_atr and not pd.isna(atr_val):
+                            tp_atr_mult = float(settings.get("grid_target_profit_atr_multiplier", 0.2))
+                            current_tp_pips = atr_val * tp_atr_mult
+                            basket_sl_mult = float(settings.get("grid_basket_sl_atr_multiplier", 3.0))
+                            basket_sl_pips = atr_val * basket_sl_mult
+                        else:
+                            current_tp_pips = grid_target_profit
+                            basket_sl_pips = grid_sl
+                            
+                        basket_tp = avg_entry + (current_tp_pips * pip_size)
+                        basket_sl = next_entry - (basket_sl_pips * pip_size)
                         
             elif basket_type == 'SELL':
                 # Check Stop Loss
@@ -264,10 +315,11 @@ def run_backtest_gann(df, symbol, geometry='square', lookback=100, use_grid=True
                     active_setup = None
                     continue
                     
-                # Check Take Profit
-                elif low_curr <= basket_tp:
-                    profit_usd = sum((leg["entry"] - basket_tp) * leg["vol"] for leg in basket) * contract_size
-                    total_pips = sum((leg["entry"] - basket_tp) * leg["vol"] for leg in basket) * pip_multiplier
+                # Check Take Profit (90% of TP distance as Close Early)
+                elif low_curr <= entry_price - (entry_price - basket_tp) * 0.90:
+                    tp_early = entry_price - (entry_price - basket_tp) * 0.90
+                    profit_usd = sum((leg["entry"] - tp_early) * leg["vol"] for leg in basket) * contract_size
+                    total_pips = sum((leg["entry"] - tp_early) * leg["vol"] for leg in basket) * pip_multiplier
                     total_vol = sum(leg["vol"] for leg in basket)
                     trades.append({
                         "type": "SELL",
@@ -279,7 +331,7 @@ def run_backtest_gann(df, symbol, geometry='square', lookback=100, use_grid=True
                         "profit_usd_raw": profit_usd,
                         "result": "WIN",
                         "sl_price": basket_sl,
-                        "tp_price": basket_tp,
+                        "tp_price": tp_early,
                         "gann_data": active_setup.copy() if active_setup else None
                     })
                     sim_balance += profit_usd
@@ -298,159 +350,237 @@ def run_backtest_gann(df, symbol, geometry='square', lookback=100, use_grid=True
                             basket_sl = entry_price # Move SL to breakeven
                     
                 # Check Grid Recovery addition
+                # Check Grid Recovery addition
                 if use_grid and len(basket) < grid_max_legs:
                     last_leg = basket[-1]
                     drawdown_pips = (high_curr - last_leg["entry"]) * pip_multiplier
-                    if drawdown_pips >= grid_step:
-                        next_entry = last_leg["entry"] + (grid_step * pip_size)
+                    
+                    atr_val = df.loc[i, 'atr14']
+                    rsi_val = df.loc[i, 'rsi14']
+                    if grid_use_atr and not pd.isna(atr_val):
+                        atr_mult = float(settings.get("grid_atr_multiplier", 1.5))
+                        current_grid_step = atr_val * atr_mult
+                    else:
+                        current_grid_step = grid_step
+                        
+                    rsi_allows = True
+                    if grid_rsi_filter and not pd.isna(rsi_val):
+                        rsi_sell_min = float(settings.get("grid_rsi_sell_min", 65.0))
+                        if rsi_val < rsi_sell_min:
+                            rsi_allows = False
+                            
+                    if drawdown_pips >= current_grid_step and rsi_allows:
+                        next_entry = last_leg["entry"] + (current_grid_step * pip_size)
                         next_vol = round(last_leg["vol"] * grid_mult, 2)
                         basket.append({"entry": next_entry, "vol": next_vol})
                         
                         total_vol = sum(leg["vol"] for leg in basket)
                         avg_entry = sum(leg["entry"] * leg["vol"] for leg in basket) / total_vol
-                        basket_tp = avg_entry - (grid_target_profit * pip_size)
-                        basket_sl = basket_initial_sl # Stop Loss remains at Point A
+                        
+                        if grid_use_atr and not pd.isna(atr_val):
+                            tp_atr_mult = float(settings.get("grid_target_profit_atr_multiplier", 0.2))
+                            current_tp_pips = atr_val * tp_atr_mult
+                            basket_sl_mult = float(settings.get("grid_basket_sl_atr_multiplier", 3.0))
+                            basket_sl_pips = atr_val * basket_sl_mult
+                        else:
+                            current_tp_pips = grid_target_profit
+                            basket_sl_pips = grid_sl
+                            
+                        basket_tp = avg_entry - (current_tp_pips * pip_size)
+                        basket_sl = next_entry + (basket_sl_pips * pip_size)
 
-        # --- Case B: Scan for structural setup or entry ---
-        if len(basket) == 0:
-            lookback_start = max(0, i - lookback)
-            window_highs = [p for p in pivots_high if lookback_start <= p[0] < i]
-            window_lows = [p for p in pivots_low if lookback_start <= p[0] < i]
-            
-            buy_setup = None
-            if len(window_lows) >= 2 and len(window_highs) >= 1:
-                for c_pivot in reversed(window_lows):
-                    idx_C, val_C = c_pivot
-                    b_pivots = [p for p in window_highs if p[0] < idx_C]
-                    if len(b_pivots) > 0:
-                        idx_B, val_B = b_pivots[-1]
-                        a_pivots = [p for p in window_lows if p[0] < idx_B]
-                        if len(a_pivots) > 0:
-                            idx_A, val_A = a_pivots[-1]
-                            if val_C > val_A and val_B > val_C:
-                                ratio = (val_B - val_C) / (val_B - val_A)
-                                if 0.50 <= ratio <= 0.75:
-                                    buy_setup = {
-                                        "A": val_A,
-                                        "B": val_B,
-                                        "C": val_C,
-                                        "idx_B": idx_B,
-                                        "time_A": df.loc[idx_A, 'time'].strftime('%Y-%m-%d %H:%M:%S') if hasattr(df.loc[idx_A, 'time'], 'strftime') else str(df.loc[idx_A, 'time']),
-                                        "time_B": df.loc[idx_B, 'time'].strftime('%Y-%m-%d %H:%M:%S') if hasattr(df.loc[idx_B, 'time'], 'strftime') else str(df.loc[idx_B, 'time']),
-                                        "time_C": df.loc[idx_C, 'time'].strftime('%Y-%m-%d %H:%M:%S') if hasattr(df.loc[idx_C, 'time'], 'strftime') else str(df.loc[idx_C, 'time'])
-                                    }
-                                    break
-                                    
-            sell_setup = None
-            if len(window_highs) >= 2 and len(window_lows) >= 1:
-                for c_pivot in reversed(window_highs):
-                    idx_C, val_C = c_pivot
-                    b_pivots = [p for p in window_lows if p[0] < idx_C]
-                    if len(b_pivots) > 0:
-                        idx_B, val_B = b_pivots[-1]
-                        a_pivots = [p for p in window_highs if p[0] < idx_B]
-                        if len(a_pivots) > 0:
-                            idx_A, val_A = a_pivots[-1]
-                            if val_C < val_A and val_B < val_C:
-                                ratio = (val_C - val_B) / (val_A - val_B)
-                                if 0.50 <= ratio <= 0.75:
-                                    sell_setup = {
-                                        "A": val_A,
-                                        "B": val_B,
-                                        "C": val_C,
-                                        "idx_B": idx_B,
-                                        "time_A": df.loc[idx_A, 'time'].strftime('%Y-%m-%d %H:%M:%S') if hasattr(df.loc[idx_A, 'time'], 'strftime') else str(df.loc[idx_A, 'time']),
-                                        "time_B": df.loc[idx_B, 'time'].strftime('%Y-%m-%d %H:%M:%S') if hasattr(df.loc[idx_B, 'time'], 'strftime') else str(df.loc[idx_B, 'time']),
-                                        "time_C": df.loc[idx_C, 'time'].strftime('%Y-%m-%d %H:%M:%S') if hasattr(df.loc[idx_C, 'time'], 'strftime') else str(df.loc[idx_C, 'time'])
-                                    }
-                                    break
-            
-            if buy_setup and sell_setup:
-                if buy_setup["idx_B"] > sell_setup["idx_B"]:
-                    active_setup = {"type": "BUY", **buy_setup}
-                else:
-                    active_setup = {"type": "SELL", **sell_setup}
-            elif buy_setup:
-                active_setup = {"type": "BUY", **buy_setup}
-            elif sell_setup:
-                active_setup = {"type": "SELL", **sell_setup}
+        # --- Case B: Scan for structural setup or entry (Reversal check enabled) ---
+        lookback_start = max(0, i - lookback)
+        window_highs = [p for p in pivots_high if lookback_start <= p[0] < i]
+        window_lows = [p for p in pivots_low if lookback_start <= p[0] < i]
+        
+        buy_setup = None
+        if len(window_lows) >= 2 and len(window_highs) >= 1:
+            for c_pivot in reversed(window_lows):
+                idx_C, val_C = c_pivot
+                b_pivots = [p for p in window_highs if p[0] < idx_C]
+                if len(b_pivots) > 0:
+                    idx_B, val_B = b_pivots[-1]
+                    a_pivots = [p for p in window_lows if p[0] < idx_B]
+                    if len(a_pivots) > 0:
+                        idx_A, val_A = a_pivots[-1]
+                        if val_C > val_A and val_B > val_C:
+                            ratio = (val_B - val_C) / (val_B - val_A)
+                            if 0.50 <= ratio <= 0.75:
+                                buy_setup = {
+                                    "A": val_A,
+                                    "B": val_B,
+                                    "C": val_C,
+                                    "idx_B": idx_B,
+                                    "time_A": df.loc[idx_A, 'time'].strftime('%Y-%m-%d %H:%M:%S') if hasattr(df.loc[idx_A, 'time'], 'strftime') else str(df.loc[idx_A, 'time']),
+                                    "time_B": df.loc[idx_B, 'time'].strftime('%Y-%m-%d %H:%M:%S') if hasattr(df.loc[idx_B, 'time'], 'strftime') else str(df.loc[idx_B, 'time']),
+                                    "time_C": df.loc[idx_C, 'time'].strftime('%Y-%m-%d %H:%M:%S') if hasattr(df.loc[idx_C, 'time'], 'strftime') else str(df.loc[idx_C, 'time'])
+                                }
+                                break
+                                
+        sell_setup = None
+        if len(window_highs) >= 2 and len(window_lows) >= 1:
+            for c_pivot in reversed(window_highs):
+                idx_C, val_C = c_pivot
+                b_pivots = [p for p in window_lows if p[0] < idx_C]
+                if len(b_pivots) > 0:
+                    idx_B, val_B = b_pivots[-1]
+                    a_pivots = [p for p in window_highs if p[0] < idx_B]
+                    if len(a_pivots) > 0:
+                        idx_A, val_A = a_pivots[-1]
+                        if val_C < val_A and val_B < val_C:
+                            ratio = (val_C - val_B) / (val_A - val_B)
+                            if 0.50 <= ratio <= 0.75:
+                                sell_setup = {
+                                    "A": val_A,
+                                    "B": val_B,
+                                    "C": val_C,
+                                    "idx_B": idx_B,
+                                    "time_A": df.loc[idx_A, 'time'].strftime('%Y-%m-%d %H:%M:%S') if hasattr(df.loc[idx_A, 'time'], 'strftime') else str(df.loc[idx_A, 'time']),
+                                    "time_B": df.loc[idx_B, 'time'].strftime('%Y-%m-%d %H:%M:%S') if hasattr(df.loc[idx_B, 'time'], 'strftime') else str(df.loc[idx_B, 'time']),
+                                    "time_C": df.loc[idx_C, 'time'].strftime('%Y-%m-%d %H:%M:%S') if hasattr(df.loc[idx_C, 'time'], 'strftime') else str(df.loc[idx_C, 'time'])
+                                }
+                                break
+        
+        detected_setup = None
+        if buy_setup and sell_setup:
+            if buy_setup["idx_B"] > sell_setup["idx_B"]:
+                detected_setup = {"type": "BUY", **buy_setup}
             else:
-                active_setup = None
-                
-            if active_setup:
-                if active_setup["type"] == "BUY":
-                    if close_curr > active_setup["B"] and open_curr <= active_setup["B"]:
-                        basket_type = 'BUY'
-                        basket_open_time = current_time
+                detected_setup = {"type": "SELL", **sell_setup}
+        elif buy_setup:
+            detected_setup = {"type": "BUY", **buy_setup}
+        elif sell_setup:
+            detected_setup = {"type": "SELL", **sell_setup}
+            
+        if detected_setup:
+            # Check for triggers
+            is_buy_trigger = detected_setup["type"] == "BUY" and close_curr > detected_setup["B"] and open_curr <= detected_setup["B"]
+            is_sell_trigger = detected_setup["type"] == "SELL" and close_curr < detected_setup["B"] and open_curr >= detected_setup["B"]
+            
+            # --- Check Reversal Close if basket is active in opposite direction ---
+            if len(basket) > 0:
+                if basket_type == 'BUY' and is_sell_trigger:
+                    # Close BUY basket
+                    profit_usd = sum((close_curr - leg["entry"]) * leg["vol"] for leg in basket) * contract_size
+                    total_pips = sum((close_curr - leg["entry"]) * leg["vol"] for leg in basket) * pip_multiplier
+                    total_vol = sum(leg["vol"] for leg in basket)
+                    trades.append({
+                        "type": "BUY",
+                        "entry_time": basket_open_time,
+                        "exit_time": current_time,
+                        "legs": len(basket),
+                        "volume": total_vol,
+                        "pips": total_pips / total_vol,
+                        "profit_usd_raw": profit_usd,
+                        "result": "WIN" if profit_usd >= 0 else "LOSS",
+                        "sl_price": basket_sl,
+                        "tp_price": basket_tp,
+                        "gann_data": active_setup.copy() if active_setup else None,
+                        "comment": "Reversal Close"
+                    })
+                    sim_balance += profit_usd
+                    basket = []
+                    basket_type = None
+                    active_setup = None
+                    
+                elif basket_type == 'SELL' and is_buy_trigger:
+                    # Close SELL basket
+                    profit_usd = sum((leg["entry"] - close_curr) * leg["vol"] for leg in basket) * contract_size
+                    total_pips = sum((leg["entry"] - close_curr) * leg["vol"] for leg in basket) * pip_multiplier
+                    total_vol = sum(leg["vol"] for leg in basket)
+                    trades.append({
+                        "type": "SELL",
+                        "entry_time": basket_open_time,
+                        "exit_time": current_time,
+                        "legs": len(basket),
+                        "volume": total_vol,
+                        "pips": total_pips / total_vol,
+                        "profit_usd_raw": profit_usd,
+                        "result": "WIN" if profit_usd >= 0 else "LOSS",
+                        "sl_price": basket_sl,
+                        "tp_price": basket_tp,
+                        "gann_data": active_setup.copy() if active_setup else None,
+                        "comment": "Reversal Close"
+                    })
+                    sim_balance += profit_usd
+                    basket = []
+                    basket_type = None
+                    active_setup = None
+            
+            # --- Open New Trade if basket is empty ---
+            if len(basket) == 0:
+                if is_buy_trigger:
+                    basket_type = 'BUY'
+                    basket_open_time = current_time
+                    active_setup = detected_setup
+                    
+                    from gann_helper import detect_dynamic_gann_levels
+                    dyn = detect_dynamic_gann_levels(detected_setup["A"], detected_setup["B"], mode='bullish')
+                    basket_tp = dyn["target_price"]
+                    basket_sl = dyn["sl_price"]
+                    basket_initial_sl = dyn["sl_price"]
+                    basket_targets = [dyn["entry_price"], dyn["target_price"]]
+                    basket_highest_reached = -1
+                    
+                    # Risk-based lot sizing
+                    risk_percent = 3.0
+                    risk_amount = sim_balance * (risk_percent / 100.0)
+                    sl_price_diff = abs(close_curr - basket_sl)
+                    if sl_price_diff > 0:
+                        vol = risk_amount / (sl_price_diff * contract_size)
+                        vol_step = symbol_info.volume_step if (symbol_info and symbol_info.volume_step > 0) else 0.01
+                        vol = round(vol / vol_step) * vol_step
+                        vol_min = symbol_info.volume_min if symbol_info else 0.01
+                        vol_max = symbol_info.volume_max if symbol_info else 100.0
+                        vol = max(vol_min, min(vol, vol_max))
+                        vol = round(vol, 2)
+                    else:
+                        vol = 0.01
                         
-                        from gann_helper import detect_dynamic_gann_levels
-                        dyn = detect_dynamic_gann_levels(active_setup["A"], active_setup["B"], mode='bullish')
-                        basket_tp = dyn["target_price"]
-                        basket_sl = dyn["sl_price"]
-                        basket_initial_sl = dyn["sl_price"]
-                        basket_targets = [dyn["entry_price"], dyn["target_price"]]
-                        basket_highest_reached = -1
+                    basket = [{"entry": close_curr, "vol": vol}]
+                    sl_dist = (close_curr - basket_sl) * pip_multiplier
+                    tp_dist = (basket_tp - close_curr) * pip_multiplier
+                    if sl_dist <= 0 or tp_dist <= 0:
+                        basket = []
+                        basket_type = None
+                        active_setup = None
                         
-                        # Dynamic lot sizing: risk 3.0% of current simulated balance
-                        risk_percent = 3.0
-                        risk_amount = sim_balance * (risk_percent / 100.0)
-                        sl_price_diff = abs(close_curr - basket_sl)
+                elif is_sell_trigger:
+                    basket_type = 'SELL'
+                    basket_open_time = current_time
+                    active_setup = detected_setup
+                    
+                    from gann_helper import detect_dynamic_gann_levels
+                    dyn = detect_dynamic_gann_levels(detected_setup["A"], detected_setup["B"], mode='bearish')
+                    basket_tp = dyn["target_price"]
+                    basket_sl = dyn["sl_price"]
+                    basket_initial_sl = dyn["sl_price"]
+                    basket_targets = [dyn["entry_price"], dyn["target_price"]]
+                    basket_highest_reached = -1
+                    
+                    # Risk-based lot sizing
+                    risk_percent = 3.0
+                    risk_amount = sim_balance * (risk_percent / 100.0)
+                    sl_price_diff = abs(basket_sl - close_curr)
+                    if sl_price_diff > 0:
+                        vol = risk_amount / (sl_price_diff * contract_size)
+                        vol_step = symbol_info.volume_step if (symbol_info and symbol_info.volume_step > 0) else 0.01
+                        vol = round(vol / vol_step) * vol_step
+                        vol_min = symbol_info.volume_min if symbol_info else 0.01
+                        vol_max = symbol_info.volume_max if symbol_info else 100.0
+                        vol = max(vol_min, min(vol, vol_max))
+                        vol = round(vol, 2)
+                    else:
+                        vol = 0.01
                         
-                        if sl_price_diff > 0:
-                            vol = risk_amount / (sl_price_diff * contract_size)
-                            vol_step = symbol_info.volume_step if (symbol_info and symbol_info.volume_step > 0) else 0.01
-                            vol = round(vol / vol_step) * vol_step
-                            vol_min = symbol_info.volume_min if symbol_info else 0.01
-                            vol_max = symbol_info.volume_max if symbol_info else 100.0
-                            vol = max(vol_min, min(vol, vol_max))
-                            vol = round(vol, 2)
-                        else:
-                            vol = 0.01
-                            
-                        basket = [{"entry": close_curr, "vol": vol}]
-                        
-                        sl_dist = (close_curr - basket_sl) * pip_multiplier
-                        tp_dist = (basket_tp - close_curr) * pip_multiplier
-                        if sl_dist <= 0 or tp_dist <= 0:
-                            basket = []
-                            basket_type = None
-                            
-                elif active_setup["type"] == "SELL":
-                    if close_curr < active_setup["B"] and open_curr >= active_setup["B"]:
-                        basket_type = 'SELL'
-                        basket_open_time = current_time
-                        
-                        from gann_helper import detect_dynamic_gann_levels
-                        dyn = detect_dynamic_gann_levels(active_setup["A"], active_setup["B"], mode='bearish')
-                        basket_tp = dyn["target_price"]
-                        basket_sl = dyn["sl_price"]
-                        basket_initial_sl = dyn["sl_price"]
-                        basket_targets = [dyn["entry_price"], dyn["target_price"]]
-                        basket_highest_reached = -1
-                        
-                        # Dynamic lot sizing: risk 3.0% of current simulated balance
-                        risk_percent = 3.0
-                        risk_amount = sim_balance * (risk_percent / 100.0)
-                        sl_price_diff = abs(basket_sl - close_curr)
-                        
-                        if sl_price_diff > 0:
-                            vol = risk_amount / (sl_price_diff * contract_size)
-                            vol_step = symbol_info.volume_step if (symbol_info and symbol_info.volume_step > 0) else 0.01
-                            vol = round(vol / vol_step) * vol_step
-                            vol_min = symbol_info.volume_min if symbol_info else 0.01
-                            vol_max = symbol_info.volume_max if symbol_info else 100.0
-                            vol = max(vol_min, min(vol, vol_max))
-                            vol = round(vol, 2)
-                        else:
-                            vol = 0.01
-                            
-                        basket = [{"entry": close_curr, "vol": vol}]
-                        
-                        sl_dist = (basket_sl - close_curr) * pip_multiplier
-                        tp_dist = (close_curr - basket_tp) * pip_multiplier
-                        if sl_dist <= 0 or tp_dist <= 0:
-                            basket = []
-                            basket_type = None
+                    basket = [{"entry": close_curr, "vol": vol}]
+                    sl_dist = (basket_sl - close_curr) * pip_multiplier
+                    tp_dist = (close_curr - basket_tp) * pip_multiplier
+                    if sl_dist <= 0 or tp_dist <= 0:
+                        basket = []
+                        basket_type = None
+                        active_setup = None
 
     return trades
 

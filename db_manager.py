@@ -147,7 +147,7 @@ def init_db():
         "auto_trade": "1",  # 1 = Auto execution, 0 = Signal Only (manual)
         "news_filter": "1",  # 1 = Enabled, 0 = Disabled
         "min_rr_ratio": "1.0",
-        "grid_enabled": "1",
+        "grid_enabled": "0",
         "grid_step": "10.0",
         "grid_multiplier": "2.0",
         "grid_max_legs": "4",
@@ -169,13 +169,23 @@ def init_db():
     for key, val in defaults.items():
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, val))
 
-    # Ensure icon settings and new settings always exist (for databases created before this feature)
     extra_keys = {
         "trading_platforms": defaults["trading_platforms"],
         "financial_instruments": defaults["financial_instruments"],
         "regulations": defaults["regulations"],
         "ai_evaluation": "1",
-        "fallback_to_technical": "1"
+        "fallback_to_technical": "1",
+        "grid_use_atr": "1",
+        "grid_rsi_filter": "1",
+        "grid_indicator_timeframe": "M5",
+        "grid_atr_multiplier": "1.5",
+        "grid_rsi_buy_max": "35.0",
+        "grid_rsi_sell_min": "65.0",
+        "grid_min_safety_step": "0.0",
+        "grid_target_profit_atr_multiplier": "0.2",
+        "grid_min_target_profit_safety": "0.0",
+        "grid_basket_sl_atr_multiplier": "3.0",
+        "grid_min_basket_sl_safety": "0.0"
     }
     for key, def_val in extra_keys.items():
         cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
@@ -258,18 +268,38 @@ def log_trade_open(ticket, symbol, action, volume, entry_price, sl, tp, reason, 
     conn.close()
 
 
-def log_trade_close(ticket, close_price, profit):
+def log_trade_close(ticket, close_price, profit, exit_reason=None):
     """Update a trade to closed status and record results."""
     conn = get_db_connection()
     cursor = conn.cursor()
     close_time = time.strftime('%Y-%m-%d %H:%M:%S')
     
+    if exit_reason:
+        cursor.execute("""
+        UPDATE trades 
+        SET close_price = ?, profit = ?, close_time = ?, status = 'CLOSED', reason = ? 
+        WHERE ticket = ?
+        """, (close_price, profit, close_time, exit_reason, ticket))
+    else:
+        cursor.execute("""
+        UPDATE trades 
+        SET close_price = ?, profit = ?, close_time = ?, status = 'CLOSED' 
+        WHERE ticket = ?
+        """, (close_price, profit, close_time, ticket))
+    
+    conn.commit()
+    conn.close()
+
+
+def update_trade_sl_tp(ticket, sl, tp):
+    """Update a trade's SL and TP prices in the database."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
     cursor.execute("""
     UPDATE trades 
-    SET close_price = ?, profit = ?, close_time = ?, status = 'CLOSED' 
+    SET sl = ?, tp = ? 
     WHERE ticket = ?
-    """, (close_price, profit, close_time, ticket))
-    
+    """, (sl, tp, ticket))
     conn.commit()
     conn.close()
 
