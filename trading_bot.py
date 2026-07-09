@@ -1064,8 +1064,11 @@ def check_and_execute_trading_cycle():
                 min_volume = symbol_info.volume_min
                 max_volume = symbol_info.volume_max
                 
+                account_info = mt5.account_info()
+                balance = account_info._asdict().get("balance", 0.0) if account_info else 0.0
+                
                 sl_distance_points = abs(entry_price - sl) / point
-                if sl_distance_points > 0:
+                if sl_distance_points > 0 and balance > 0:
                     estimated_loss = sl_distance_points * volume * tick_value
                     max_allowed_loss = balance * 0.03 # 3% of balance
                     
