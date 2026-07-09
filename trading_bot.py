@@ -378,14 +378,16 @@ def sync_db_with_mt5_positions():
 def check_m5_exit_signal(symbol, pos_type):
     """
     Checks if there is an exit signal on M5 timeframe:
-    - For BUY (0): returns True if a Lower Low (LL) is formed on M5.
-    - For SELL (1): returns True if a Higher High (HH) is formed on M5.
+    - For BUY (0): returns True if a Lower Low (LL) is formed on M5, 
+      where the new downward wave length is >= 25% larger than the previous, and the low is recent.
+    - For SELL (1): returns True if a Higher High (HH) is formed on M5,
+      where the new upward wave length is >= 25% larger than the previous, and the high is recent.
     """
     df = get_candles(symbol=symbol, timeframe=mt5.TIMEFRAME_M5, count=60)
     if df is None or len(df) < 15:
         return False
 
-    # Find swing highs and lows with window = 2
+    # Find swing highs and lows with window = 2, storing (index, price)
     window = 2
     swing_highs = []
     swing_lows = []
@@ -398,7 +400,7 @@ def check_m5_exit_signal(symbol, pos_type):
                 is_high = False
                 break
         if is_high:
-            swing_highs.append(df['High'].iloc[i])
+            swing_highs.append((i, float(df['High'].iloc[i])))
 
         # Check for swing low
         is_low = True
@@ -407,22 +409,55 @@ def check_m5_exit_signal(symbol, pos_type):
                 is_low = False
                 break
         if is_low:
-            swing_lows.append(df['Low'].iloc[i])
+            swing_lows.append((i, float(df['Low'].iloc[i])))
 
     if pos_type == 0:  # BUY trade -> Check for Lower Low (LL)
         if len(swing_lows) >= 2:
-            latest_low = swing_lows[-1]
-            prev_low = swing_lows[-2]
-            if latest_low < prev_low:
-                print(f"[M5 EXIT] BUY trade exit triggered: Lower Low detected on M5 ({latest_low:.5f} < {prev_low:.5f})")
-                return True
+            latest_idx, latest_val = swing_lows[-1]
+            prev_idx, prev_val = swing_lows[-2]
+            
+            # 1. Recency check (Latest low must have formed within the last 4 completed candles)
+            if len(df) - 1 - latest_idx <= 4:
+                # 2. Lower Low check
+                if latest_val < prev_val:
+                    # 3. Wave size check (latest downward wave vs previous downward wave)
+                    preceding_highs_latest = [sh for sh in swing_highs if sh[0] < latest_idx]
+                    preceding_highs_prev = [sh for sh in swing_highs if sh[0] < prev_idx]
+                    
+                    if preceding_highs_latest and preceding_highs_prev:
+                        latest_wave = preceding_highs_latest[-1][1] - latest_val
+                        prev_wave = preceding_highs_prev[-1][1] - prev_val
+                        
+                        if prev_wave > 0 and latest_wave >= 1.25 * prev_wave:
+                            print(f"[M5 EXIT] BUY trade exit triggered: Recent Lower Low detected. "
+                                  f"Latest Low: {latest_val:.5f} (Wave: {latest_wave:.5f}), "
+                                  f"Prev Low: {prev_val:.5f} (Wave: {prev_wave:.5f}). "
+                                  f"Wave length increased by {(latest_wave/prev_wave - 1)*100:.1f}%.")
+                            return True
+                            
     elif pos_type == 1:  # SELL trade -> Check for Higher High (HH)
         if len(swing_highs) >= 2:
-            latest_high = swing_highs[-1]
-            prev_high = swing_highs[-2]
-            if latest_high > prev_high:
-                print(f"[M5 EXIT] SELL trade exit triggered: Higher High detected on M5 ({latest_high:.5f} > {prev_high:.5f})")
-                return True
+            latest_idx, latest_val = swing_highs[-1]
+            prev_idx, prev_val = swing_highs[-2]
+            
+            # 1. Recency check (Latest high must have formed within the last 4 completed candles)
+            if len(df) - 1 - latest_idx <= 4:
+                # 2. Higher High check
+                if latest_val > prev_val:
+                    # 3. Wave size check (latest upward wave vs previous upward wave)
+                    preceding_lows_latest = [sl for sl in swing_lows if sl[0] < latest_idx]
+                    preceding_lows_prev = [sl for sl in swing_lows if sl[0] < prev_idx]
+                    
+                    if preceding_lows_latest and preceding_lows_prev:
+                        latest_wave = latest_val - preceding_lows_latest[-1][1]
+                        prev_wave = prev_val - preceding_lows_prev[-1][1]
+                        
+                        if prev_wave > 0 and latest_wave >= 1.25 * prev_wave:
+                            print(f"[M5 EXIT] SELL trade exit triggered: Recent Higher High detected. "
+                                  f"Latest High: {latest_val:.5f} (Wave: {latest_wave:.5f}), "
+                                  f"Prev High: {prev_val:.5f} (Wave: {prev_wave:.5f}). "
+                                  f"Wave length increased by {(latest_wave/prev_wave - 1)*100:.1f}%.")
+                            return True
 
     return False
 
