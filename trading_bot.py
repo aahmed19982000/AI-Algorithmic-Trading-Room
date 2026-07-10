@@ -852,6 +852,39 @@ def check_and_execute_trading_cycle():
 
         print(f"🎯 [TECHNICAL TRIGGER] Generated {proposed_action} signal for {symbol}. Reason: {technical_reason}")
 
+        # --- PRE-AI VALIDATION CHECKS (Token Savers) ---
+        # 1. Check active positions for this symbol to prevent double entries in same direction
+        symbol_positions = [pos for pos in active_positions if pos.magic == MAGIC_NUMBER and pos.symbol == symbol]
+        has_same_direction = False
+        if symbol_positions:
+            for pos in symbol_positions:
+                pos_type_str = "BUY" if pos.type == mt5.POSITION_TYPE_BUY else "SELL"
+                if pos_type_str == proposed_action:
+                    has_same_direction = True
+
+        if has_same_direction:
+            skip_msg = f"Already have an active {proposed_action} position on {symbol}. Skipping AI call and entry."
+            print(f"[SKIP] {skip_msg}")
+            last_scan_reports[symbol] = {
+                "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                "status": "Already Open",
+                "details": skip_msg,
+                "structure": gann_context
+            }
+            continue
+
+        # 2. Check if the last closed trade was a Stop Loss and blocks re-entry
+        if is_setup_stopped_out(symbol, gann_context, proposed_action):
+            block_msg = f"Blocked re-entry on {symbol} in direction {proposed_action}. The setup/symbol recently hit Stop Loss or was already traded."
+            print(f"[BLOCKED] {block_msg}")
+            last_scan_reports[symbol] = {
+                "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                "status": "Blocked (Stop Loss / Traded)",
+                "details": block_msg,
+                "structure": gann_context
+            }
+            continue
+
         # Run AI analysis (if enabled) or bypass
         decision = "HOLD"
         trade_params = None
@@ -1009,22 +1042,7 @@ def check_and_execute_trading_cycle():
             symbol_positions = [pos for pos in active_positions if pos.magic == MAGIC_NUMBER and pos.symbol == symbol]
             has_opposite_direction = False
             
-        # If we have active positions in the same direction, skip opening a new trade (Prevent Double Entry)
-        if decision in ["BUY", "SELL"] and has_same_direction:
-            skip_msg = f"Already have an active {decision} position on {symbol}. Skipping new entry to prevent double entry."
-            print(f"[SKIP] {skip_msg}")
-            last_scan_reports[symbol]["status"] = "Already Open"
-            last_scan_reports[symbol]["details"] = skip_msg
-            continue
-
-        # Check if the last closed trade was a Stop Loss and blocks re-entry
-        if decision in ["BUY", "SELL"]:
-            if is_setup_stopped_out(symbol, gann_context, decision):
-                block_msg = f"Blocked re-entry on {symbol} in direction {decision}. The setup/symbol recently hit Stop Loss or was already traded."
-                print(f"[BLOCKED] {block_msg}")
-                last_scan_reports[symbol]["status"] = "Blocked (Stop Loss / Traded)"
-                last_scan_reports[symbol]["details"] = block_msg
-                continue
+        # (Re-entry and duplicate entry checks are now handled pre-AI to conserve tokens)
 
         # 4. Handle decision
         if decision in ["BUY", "SELL"] and trade_params:
