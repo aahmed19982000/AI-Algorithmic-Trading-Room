@@ -24,8 +24,7 @@ from db_manager import (
     log_trade_open, 
     log_trade_close, 
     get_active_trades, 
-    log_balance_snapshot,
-    get_db_connection
+    log_balance_snapshot
 )
 from gann_helper import detect_market_structure, calculate_gann_levels
 
@@ -38,21 +37,55 @@ DEFAULT_TIMEFRAME = os.getenv("TRADING_TIMEFRAME", "H4")
 last_scan_reports = {}
 
 
+def get_db_connection():
+    import sqlite3
+    conn = sqlite3.connect("database.db")
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
 def is_setup_stopped_out(symbol, gann_context, decision):
     """
     Checks if the last closed trade for this symbol was closed due to Stop Loss,
-    and if so, prevents re-entry if either:
-    1. The Gann setup (time_B & time_C) matches the stopped-out trade.
-    2. Or a 4-hour cooldown has not passed since the Stop Loss hit (for technical/general safety).
+    and prevents re-entry. Also blocks re-entry if the current Gann setup (time_B & time_C)
+    has already been traded (opened or closed) in the database.
     """
     import json
     from datetime import datetime
     
+    # 1. Block re-entry on the same Gann setup
+    if gann_context:
+        curr_time_B = gann_context.get("time_B")
+        curr_time_C = gann_context.get("time_C")
+        
+        if curr_time_B and curr_time_C:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            try:
+                cursor.execute("""
+                    SELECT ticket, gann_data FROM trades 
+                    WHERE symbol = ?
+                """, (symbol,))
+                rows = cursor.fetchall()
+                for row in rows:
+                    ticket, db_gann_str = row
+                    if db_gann_str:
+                        db_gann = json.loads(db_gann_str)
+                        if db_gann:
+                            if db_gann.get("time_B") == curr_time_B and db_gann.get("time_C") == curr_time_C:
+                                print(f"[RE-ENTRY BLOCK] Gann setup (B: {curr_time_B}, C: {curr_time_C}) already traded on ticket #{ticket}.")
+                                return True
+            except Exception as db_ex:
+                print(f"[ERROR] Failed to query Gann setup trades: {db_ex}")
+            finally:
+                conn.close()
+
+    # 2. General Cooldown / Stop Loss check for non-matching setups
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
         cursor.execute("""
-            SELECT ticket, action, profit, gann_data, close_time, reason 
+            SELECT ticket, action, profit, close_time, reason 
             FROM trades 
             WHERE symbol = ? AND status = 'CLOSED' 
             ORDER BY close_time DESC LIMIT 1
@@ -67,40 +100,20 @@ def is_setup_stopped_out(symbol, gann_context, decision):
     if not row:
         return False
         
-    ticket, action, profit, db_gann_str, close_time, reason = row
+    ticket, action, profit, close_time, reason = row
     
-    # Check if the close reason indicated hitting Stop Loss
     is_stop_loss = False
     if reason and "Hit Stop Loss" in reason:
         is_stop_loss = True
     elif profit < 0:
-        # Fallback: if profit is negative, treat as stopped out/loss
         is_stop_loss = True
         
     if not is_stop_loss:
         return False
         
-    # If the last trade direction was different, we don't block
     if action != decision:
         return False
         
-    # Case 1: Check Gann swing structure match (to block re-entry on the same structure)
-    if gann_context and db_gann_str:
-        try:
-            db_gann = json.loads(db_gann_str)
-            if db_gann:
-                curr_time_B = gann_context.get("time_B")
-                curr_time_C = gann_context.get("time_C")
-                db_time_B = db_gann.get("time_B")
-                db_time_C = db_gann.get("time_C")
-                
-                if curr_time_B == db_time_B and curr_time_C == db_time_C:
-                    print(f"[RE-ENTRY BLOCK] Same Gann setup (B: {curr_time_B}, C: {curr_time_C}) already stopped out on ticket #{ticket}.")
-                    return True
-        except Exception as e:
-            print(f"[ERROR] Comparing Gann data: {e}")
-            
-    # Case 2: Cooldown check (prevent any re-entry on same symbol & direction for 4 hours)
     if close_time:
         try:
             close_dt = datetime.strptime(close_time, '%Y-%m-%d %H:%M:%S')
@@ -114,14 +127,96 @@ def is_setup_stopped_out(symbol, gann_context, decision):
     return False
 
 
+def check_m5_exit_signal(symbol, pos_type):
+    """
+    Checks if there is an exit signal on M5 timeframe:
+    - For BUY (0): returns True if a Lower Low (LL) is formed on M5,
+      with a correction separating them, and a candle Close below the previous low.
+    - For SELL (1): returns True if a Higher High (HH) is formed on M5,
+      with a correction separating them, and a candle Close above the previous high.
+    """
+    df = get_candles(symbol=symbol, timeframe=mt5.TIMEFRAME_M5, count=60)
+    if df is None or len(df) < 15:
+        return False
+
+    # Find swing highs and lows with window = 2, storing (index, price)
+    window = 2
+    swing_highs = []
+    swing_lows = []
+
+    for i in range(window, len(df) - window):
+        # Check for swing high
+        is_high = True
+        for j in range(i - window, i + window + 1):
+            if df['High'].iloc[j] > df['High'].iloc[i]:
+                is_high = False
+                break
+        if is_high:
+            swing_highs.append((i, float(df['High'].iloc[i])))
+
+        # Check for swing low
+        is_low = True
+        for j in range(i - window, i + window + 1):
+            if df['Low'].iloc[j] < df['Low'].iloc[i]:
+                is_low = False
+                break
+        if is_low:
+            swing_lows.append((i, float(df['Low'].iloc[i])))
+
+    if pos_type == 0:  # BUY trade -> Check for Lower Low (LL)
+        if len(swing_lows) >= 2:
+            latest_idx, latest_val = swing_lows[-1]
+            prev_idx, prev_val = swing_lows[-2]
+            
+            # 1. Recency check (Latest low must have formed within the last 4 completed candles)
+            if len(df) - 1 - latest_idx <= 4:
+                # 2. Lower Low check
+                if latest_val < prev_val:
+                    # 3. Correction check: at least one swing high must exist between prev_idx and latest_idx
+                    correction_exists = any(prev_idx < sh[0] < latest_idx for sh in swing_highs)
+                    if correction_exists:
+                        # 4. Candle Close Breakout check: at least one candle from prev_idx + 1 onwards must close below prev_val
+                        close_breakout = False
+                        for idx in range(prev_idx + 1, len(df)):
+                            if float(df['Close'].iloc[idx]) < prev_val:
+                                close_breakout = True
+                                break
+                        if close_breakout:
+                            print(f"[M5 EXIT] BUY trade exit triggered: Recent Lower Low detected on M5. "
+                                  f"Latest Low: {latest_val:.5f}, Prev Low: {prev_val:.5f}.")
+                            return True
+                            
+    elif pos_type == 1:  # SELL trade -> Check for Higher High (HH)
+        if len(swing_highs) >= 2:
+            latest_idx, latest_val = swing_highs[-1]
+            prev_idx, prev_val = swing_highs[-2]
+            
+            # 1. Recency check (Latest high must have formed within the last 4 completed candles)
+            if len(df) - 1 - latest_idx <= 4:
+                # 2. Higher High check
+                if latest_val > prev_val:
+                    # 3. Correction check: at least one swing low must exist between prev_idx and latest_idx
+                    correction_exists = any(prev_idx < sl[0] < latest_idx for sl in swing_lows)
+                    if correction_exists:
+                        # 4. Candle Close Breakout check: at least one candle from prev_idx + 1 onwards must close above prev_val
+                        close_breakout = False
+                        for idx in range(prev_idx + 1, len(df)):
+                            if float(df['Close'].iloc[idx]) > prev_val:
+                                close_breakout = True
+                                break
+                        if close_breakout:
+                            print(f"[M5 EXIT] SELL trade exit triggered: Recent Higher High detected on M5. "
+                                  f"Latest High: {latest_val:.5f}, Prev High: {prev_val:.5f}.")
+                            return True
+
+    return False
+
+
 def calculate_lot_size(symbol, sl_price, entry_price, risk_percent=1.0):
     """
     Calculate position size (lots) based on risk percentage of account balance
     and Stop Loss distance in points.
     """
-    # Hard cap risk_percent to 3% max to protect the account
-    risk_percent = min(risk_percent, 3.0)
-    
     account_info = get_account_info()
     if not account_info:
         print("[WARNING] Could not fetch account info for lot size calculation. Defaulting to 0.01 lots.")
@@ -299,29 +394,17 @@ def sync_db_with_mt5_positions():
                 exit_reason = "Gann Reversal Close (إغلاق بسبب انعكاس الاتجاه)"
             elif close_comment == "Manual Web Close":
                 exit_reason = "Manual Web Close (إغلاق يدوي من لوحة التحكم للويب)"
-            elif "TP 90% Close Early" in close_comment or "Take Profit 90%" in close_comment:
-                exit_reason = "Take Profit 90% Close Early (إغلاق مبكر عند 90% من الهدف)"
-            elif "M5" in close_comment:
-                exit_reason = f"M5 Swing Close ({close_comment})"
-            elif close_reason_code == 4: # DEAL_REASON_SL
+            elif close_reason_code == 3:
                 exit_reason = "Hit Stop Loss (ضرب الاستوب)"
-            elif close_reason_code == 5: # DEAL_REASON_TP
+            elif close_reason_code == 4:
                 exit_reason = "Hit Take Profit (ضرب الهدف)"
-            elif close_reason_code == 6: # DEAL_REASON_SO
-                exit_reason = "Stop Out (تسييل الحساب - مارجن كول)"
-            elif close_reason_code == 0: # DEAL_REASON_CLIENT
+            elif close_reason_code == 0:
                 exit_reason = "Manual MT5 Close (إغلاق يدوي مباشر من تطبيق/منصة MT5)"
-            else:
-                # Fallback based on profit
-                if profit < 0:
-                    exit_reason = "Hit Stop Loss (ضرب الاستوب - تلقائي)"
-                elif profit > 0:
-                    exit_reason = "Hit Take Profit (ضرب الهدف - تلقائي)"
-                elif close_comment:
-                    exit_reason = f"Closed: {close_comment}"
+            elif close_comment:
+                exit_reason = f"Closed: {close_comment}"
 
-            # Log as closed in database with exit reason
-            log_trade_close(ticket, close_price, profit, exit_reason=exit_reason)
+            # Log as closed in database
+            log_trade_close(ticket, close_price, profit)
             print(f"[SYNC] Closed position ticket {ticket} detected and logged in DB (Profit: ${profit})")
             
             # Send Telegram closed alert and update screenshot
@@ -375,266 +458,173 @@ def sync_db_with_mt5_positions():
                 print(f"[TELEGRAM] [ERROR] Failed to send closed alert: {tg_ex}")
 
 
-def check_h1_exit_signal(symbol, pos_type):
+def manage_active_positions_grid():
     """
-    Checks if there is an exit signal on H1 timeframe:
-    - For BUY (0): returns True if a Lower Low (LL) is formed on H1, 
-      where the new downward wave length is >= 25% larger than the previous, and the low is recent.
-    - For SELL (1): returns True if a Higher High (HH) is formed on H1,
-      where the new upward wave length is >= 25% larger than the previous, and the high is recent.
+    Monitors active positions in MetaTrader 5.
+    If a position goes into drawdown by grid_step, opens the next Martingale grid leg
+    and modifies the TP/SL of all active legs of that symbol.
     """
-    df = get_candles(symbol=symbol, timeframe=mt5.TIMEFRAME_H1, count=60)
-    if df is None or len(df) < 15:
-        return False
+    settings = get_settings()
+    grid_enabled = int(settings.get("grid_enabled", 1)) == 1
+    if not grid_enabled:
+        return
 
-    # Find swing highs and lows with window = 2, storing (index, price)
-    window = 2
-    swing_highs = []
-    swing_lows = []
+    grid_step = float(settings.get("grid_step", 10.0))
+    multiplier = float(settings.get("grid_multiplier", 2.0))
+    max_legs = int(settings.get("grid_max_legs", 4))
+    target_profit = float(settings.get("grid_target_profit", 2.0))
+    grid_sl = float(settings.get("grid_sl", 20.0))
 
-    for i in range(window, len(df) - window):
-        # Check for swing high
-        is_high = True
-        for j in range(i - window, i + window + 1):
-            if df['High'].iloc[j] > df['High'].iloc[i]:
-                is_high = False
-                break
-        if is_high:
-            swing_highs.append((i, float(df['High'].iloc[i])))
-
-        # Check for swing low
-        is_low = True
-        for j in range(i - window, i + window + 1):
-            if df['Low'].iloc[j] < df['Low'].iloc[i]:
-                is_low = False
-                break
-        if is_low:
-            swing_lows.append((i, float(df['Low'].iloc[i])))
-
-    if pos_type == 0:  # BUY trade -> Check for Lower Low (LL)
-        if len(swing_lows) >= 2:
-            latest_idx, latest_val = swing_lows[-1]
-            prev_idx, prev_val = swing_lows[-2]
-            
-            # 1. Recency check (Latest low must have formed within the last 4 completed candles)
-            if len(df) - 1 - latest_idx <= 4:
-                # 2. Lower Low check
-                if latest_val < prev_val:
-                    # 3. Wave size check (latest downward wave vs previous downward wave)
-                    preceding_highs_latest = [sh for sh in swing_highs if sh[0] < latest_idx]
-                    preceding_highs_prev = [sh for sh in swing_highs if sh[0] < prev_idx]
-                    
-                    if preceding_highs_latest and preceding_highs_prev:
-                        latest_wave = preceding_highs_latest[-1][1] - latest_val
-                        prev_wave = preceding_highs_prev[-1][1] - prev_val
-                        
-                        if prev_wave > 0 and latest_wave >= 1.25 * prev_wave:
-                            print(f"[H1 EXIT] BUY trade exit triggered: Recent Lower Low detected. "
-                                  f"Latest Low: {latest_val:.5f} (Wave: {latest_wave:.5f}), "
-                                  f"Prev Low: {prev_val:.5f} (Wave: {prev_wave:.5f}). "
-                                  f"Wave length increased by {(latest_wave/prev_wave - 1)*100:.1f}%.")
-                            return True
-                            
-    elif pos_type == 1:  # SELL trade -> Check for Higher High (HH)
-        if len(swing_highs) >= 2:
-            latest_idx, latest_val = swing_highs[-1]
-            prev_idx, prev_val = swing_highs[-2]
-            
-            # 1. Recency check (Latest high must have formed within the last 4 completed candles)
-            if len(df) - 1 - latest_idx <= 4:
-                # 2. Higher High check
-                if latest_val > prev_val:
-                    # 3. Wave size check (latest upward wave vs previous upward wave)
-                    preceding_lows_latest = [sl for sl in swing_lows if sl[0] < latest_idx]
-                    preceding_lows_prev = [sl for sl in swing_lows if sl[0] < prev_idx]
-                    
-                    if preceding_lows_latest and preceding_lows_prev:
-                        latest_wave = latest_val - preceding_lows_latest[-1][1]
-                        prev_wave = prev_val - preceding_lows_prev[-1][1]
-                        
-                        if prev_wave > 0 and latest_wave >= 1.25 * prev_wave:
-                            print(f"[H1 EXIT] SELL trade exit triggered: Recent Higher High detected. "
-                                  f"Latest High: {latest_val:.5f} (Wave: {latest_wave:.5f}), "
-                                  f"Prev High: {prev_val:.5f} (Wave: {prev_wave:.5f}). "
-                                  f"Wave length increased by {(latest_wave/prev_wave - 1)*100:.1f}%.")
-                            return True
-
-    return False
-
-
-def manage_active_positions_tp_sl():
-    """
-    Monitors active positions and applies:
-    1. Moves SL to entry price (breakeven) when 50% of the target (TP) distance is reached.
-    2. Closes the trade immediately when 90% of the target is reached (only 10% remaining).
-    3. Closes the trade if M5 forms Higher High (for SELL) or Lower Low (for BUY).
-    """
+    # Fetch active positions from MT5
     active_positions = get_open_positions()
     if not active_positions:
         return
 
+    # Group positions by symbol
+    from collections import defaultdict
+    grouped = defaultdict(list)
     for pos in active_positions:
-        if pos.magic != MAGIC_NUMBER:
+        if pos.magic == MAGIC_NUMBER:
+            grouped[pos.symbol].append(pos)
+
+    for symbol, pos_list in grouped.items():
+        if len(pos_list) == 0:
             continue
 
-        symbol = pos.symbol
-        ticket = pos.ticket
-        entry_price = pos.price_open
-        current_price = pos.price_current
-        tp = pos.tp
-        sl = pos.sl
-        pos_type = pos.type # 0 = BUY, 1 = SELL
-
-        # If there is no TP, we cannot calculate percentages
-        if tp <= 0:
+        # Sort positions by open time
+        pos_list = sorted(pos_list, key=lambda p: p.time)
+        basket_type = 'BUY' if pos_list[0].type == 0 else 'SELL'
+        
+        # Get current price info
+        tick = mt5.symbol_info_tick(symbol)
+        if not tick:
             continue
-
+            
+        current_price = tick.bid if basket_type == 'BUY' else tick.ask
         symbol_info = mt5.symbol_info(symbol)
         if not symbol_info:
             continue
-
-        digits = symbol_info.digits
-
-        # Calculate distances
-        if pos_type == 0:  # BUY
-            tp_dist = tp - entry_price
-            current_dist = current_price - entry_price
-        else:  # SELL
-            tp_dist = entry_price - tp
-            current_dist = entry_price - current_price
-
-        if tp_dist <= 0:
-            continue
-
-        # 1. Check H1 swing exit signal
-        if check_h1_exit_signal(symbol, pos_type):
-            exit_reason_ar = "تكوين قمة أعلى (للبيع) أو قاع أدنى (للشراء) على H1"
-            exit_reason_en = f"H1 {'Lower Low' if pos_type == 0 else 'Higher High'} Exit"
-            print(f"[H1 EXIT] Closing Position #{ticket} ({symbol}) due to H1 exit signal.")
             
-            # Close the trade on MT5
-            close_res = close_position(ticket=ticket, comment=exit_reason_en[:28])
-            if close_res:
-                # Log closed trade in DB
-                log_trade_close(ticket, current_price, pos.profit, exit_reason=f"{exit_reason_en} ({exit_reason_ar})")
+        point = symbol_info.point
+        contract_size = symbol_info.trade_contract_size
+        if contract_size < 1000.0:
+            pip_size = (0.01 * current_price) / 10.0
+            pip_multiplier = 1.0 / pip_size
+        else:
+            is_jpy = symbol.upper().endswith("JPY") or "JPY" in symbol.upper()
+            pip_size = 0.01 if is_jpy else 0.0001
+            pip_multiplier = 100.0 if is_jpy else 10000.0
+        
+        # Find drawdown from the last opened leg
+        last_leg = pos_list[-1]
+        last_entry = last_leg.price_open
+        
+        if basket_type == 'BUY':
+            drawdown_pips = (last_entry - tick.bid) * pip_multiplier
+        else:
+            drawdown_pips = (tick.ask - last_entry) * pip_multiplier
+
+        print(f"[GRID INFO] Symbol {symbol} has {len(pos_list)} active legs. Drawdown from last leg: {drawdown_pips:.1f} pips.")
+
+        # Check if we need to open the next leg
+        if drawdown_pips >= grid_step:
+            if len(pos_list) < max_legs:
+                print(f"[GRID TRIGGER] Drawdown ({drawdown_pips:.1f} pips) >= Grid Step ({grid_step} pips). Opening next leg!")
                 
-                # Fetch trade info from DB for notifications
-                try:
-                    from db_manager import get_trade_history
-                    history = get_trade_history(limit=50)
-                    db_trade = next((t for t in history if t["ticket"] == ticket), None)
-                    
-                    # Notify via Telegram
-                    result = "WIN" if pos.profit >= 0 else "LOSS"
-                    close_time_str = time.strftime('%Y-%m-%d %H:%M:%S')
-                    
-                    from telegram_notifier import notify_trade_close
-                    notify_trade_close(
-                        ticket=ticket,
+                # Sizing: last position lot size * multiplier
+                next_lot = round(last_leg.volume * multiplier, 2)
+                next_lot = max(symbol_info.volume_min, min(next_lot, symbol_info.volume_max))
+                next_lot = round(next_lot, 2)
+                
+                # Execute Trade leg
+                trade_res = open_trade(
+                    action=basket_type,
+                    symbol=symbol,
+                    volume=next_lot,
+                    sl=0.0,
+                    tp=0.0,
+                    magic=MAGIC_NUMBER,
+                    comment=f"Leg {len(pos_list)+1} Recovery"[:28]
+                )
+                
+                if trade_res and trade_res["success"]:
+                    log_trade_open(
+                        ticket=trade_res["ticket"],
                         symbol=symbol,
-                        action="BUY" if pos_type == 0 else "SELL",
-                        volume=pos.volume,
-                        entry_price=entry_price,
-                        close_price=current_price,
-                        profit=pos.profit,
-                        result=result,
-                        open_time=db_trade["open_time"] if db_trade else close_time_str,
-                        close_time=close_time_str,
-                        screenshot_url=db_trade.get("screenshot_url") if db_trade else None,
-                        original_msg_id=db_trade.get("telegram_msg_id") if db_trade else None,
-                        exit_reason=f"{exit_reason_en} ({exit_reason_ar})"
+                        action=basket_type,
+                        volume=next_lot,
+                        entry_price=trade_res["price"],
+                        sl=0.0,
+                        tp=0.0,
+                        reason=f"Martingale Leg {len(pos_list)+1} added"
                     )
-                except Exception as tg_ex:
-                    print(f"[TELEGRAM] [ERROR] Failed to send M5 exit notification: {tg_ex}")
-            continue # Go to next position
+                    
+                    time.sleep(0.5)
+                    pos_list = get_open_positions(symbol=symbol)
+                    pos_list = [p for p in pos_list if p.magic == MAGIC_NUMBER]
+                    pos_list = sorted(pos_list, key=lambda p: p.time)
+            else:
+                print(f"[GRID INFO] Drawdown is {drawdown_pips:.1f} pips but Max Legs ({max_legs}) reached. Waiting.")
 
-        pct_reached = current_dist / tp_dist
-
-        # 2. Close early if 90% of target is reached (10% remaining)
-        if pct_reached >= 0.90:
-            print(f"[TP CLOSE EARLY] Position #{ticket} ({symbol}) reached {pct_reached*100:.1f}% of TP. Closing early.")
+        # Recalculate average entry price, TP and SL for the whole basket
+        if len(pos_list) > 0:
+            total_vol = sum(p.volume for p in pos_list)
+            weighted_entry = sum(p.price_open * p.volume for p in pos_list) / total_vol
             
-            # Close the trade on MT5
-            close_res = close_position(ticket=ticket, comment="TP 90% Close Early")
-            if close_res:
-                # Log closed trade in DB
-                log_trade_close(ticket, current_price, pos.profit, exit_reason="Take Profit 90% Close Early (إغلاق مبكر عند 90% من الهدف)")
+            if len(pos_list) == 1:
+                grid_tp = float(settings.get("grid_tp", 20.0))
+                tp_price = weighted_entry + (grid_tp * pip_size) if basket_type == 'BUY' else weighted_entry - (grid_tp * pip_size)
+            else:
+                tp_price = weighted_entry + (target_profit * pip_size) if basket_type == 'BUY' else weighted_entry - (target_profit * pip_size)
                 
-                # Fetch trade info from DB for notifications
-                try:
-                    from db_manager import get_trade_history
-                    history = get_trade_history(limit=50)
-                    db_trade = next((t for t in history if t["ticket"] == ticket), None)
-                    
-                    # Notify via Telegram
-                    result = "WIN" if pos.profit >= 0 else "LOSS"
-                    close_time_str = time.strftime('%Y-%m-%d %H:%M:%S')
-                    
-                    from telegram_notifier import notify_trade_close
-                    notify_trade_close(
-                        ticket=ticket,
-                        symbol=symbol,
-                        action="BUY" if pos_type == 0 else "SELL",
-                        volume=pos.volume,
-                        entry_price=entry_price,
-                        close_price=current_price,
-                        profit=pos.profit,
-                        result=result,
-                        open_time=db_trade["open_time"] if db_trade else close_time_str,
-                        close_time=close_time_str,
-                        screenshot_url=db_trade.get("screenshot_url") if db_trade else None,
-                        original_msg_id=db_trade.get("telegram_msg_id") if db_trade else None,
-                        exit_reason="Take Profit 90% Close Early (إغلاق مبكر عند 90% من الهدف)"
-                    )
-                except Exception as tg_ex:
-                    print(f"[TELEGRAM] [ERROR] Failed to send close early alert: {tg_ex}")
-            continue # Go to next position
-
-        # 2. Move SL to entry (breakeven) if 50% of target is reached (50% remaining)
-        if pct_reached >= 0.50:
-            # Check if SL is already at or better than entry
-            is_sl_already_breakeven = False
-            if pos_type == 0: # BUY
-                if sl >= entry_price:
-                    is_sl_already_breakeven = True
-            else: # SELL
-                if sl > 0 and sl <= entry_price:
-                    is_sl_already_breakeven = True
-
-            if not is_sl_already_breakeven:
-                new_sl = round(entry_price, digits)
-                new_tp = round(tp, digits)
+            last_entry_price = pos_list[-1].price_open
+            is_gann_trade = any("gann" in (pos.comment or "").lower() for pos in pos_list)
+            
+            if is_gann_trade and pos_list[0].sl > 0:
+                sl_price = pos_list[0].sl
+                print(f"[GRID INFO] Gann trade detected. Preserving oldest SL price: {sl_price}")
+            else:
+                sl_price = last_entry_price - (grid_sl * pip_size) if basket_type == 'BUY' else last_entry_price + (grid_sl * pip_size)
+            
+            # --- APPLY GRID PROTECTIONS ---
+            # 1. Calculate percentage distance reached towards TP
+            tp_dist = abs(tp_price - weighted_entry)
+            current_dist = (current_price - weighted_entry) if basket_type == 'BUY' else (weighted_entry - current_price)
+            pct_reached = current_dist / tp_dist if tp_dist > 0 else 0.0
+            
+            # 2. Check 90% Early Close
+            if pct_reached >= 0.90:
+                print(f"[TP CLOSE EARLY] Basket for {symbol} reached {pct_reached*100:.1f}% of TP. Closing basket early.")
+                for pos in pos_list:
+                    close_res = close_position(ticket=pos.ticket, comment="TP 90% Close Early")
+                    if close_res:
+                        log_trade_close(pos.ticket, current_price, pos.profit, exit_reason="Take Profit 90% Close Early")
+                continue
                 
-                print(f"[BREAKEVEN] Position #{ticket} ({symbol}) reached {pct_reached*100:.1f}% of TP. Moving SL to Entry ({new_sl}).")
+            # 3. Check M5 Swing Exit
+            if check_m5_exit_signal(symbol, 0 if basket_type == 'BUY' else 1):
+                exit_reason_ar = "تكوين قمة أعلى (للبيع) أو قاع أدنى (للشراء) على M5"
+                exit_reason_en = f"M5 {'Lower Low' if basket_type == 'BUY' else 'Higher High'} Exit"
+                print(f"[M5 EXIT] Closing basket for {symbol} due to M5 exit signal.")
+                for pos in pos_list:
+                    close_res = close_position(ticket=pos.ticket, comment=exit_reason_en[:28])
+                    if close_res:
+                        log_trade_close(pos.ticket, current_price, pos.profit, exit_reason=f"{exit_reason_en} ({exit_reason_ar})")
+                continue
                 
-                # Modify SL on MT5
-                mod_res = modify_position_sl_tp(ticket, new_sl, new_tp)
-                if mod_res:
-                    # Update DB
-                    try:
-                        from db_manager import update_trade_sl_tp
-                        update_trade_sl_tp(ticket, new_sl, new_tp)
-                    except Exception as db_err:
-                        print(f"[ERROR] Failed to update SL to breakeven in DB: {db_err}")
-                        
-                    # Notify Telegram
-                    try:
-                        from telegram_notifier import get_telegram_config, send_telegram_message
-                        enabled, token, chat_id = get_telegram_config()
-                        if enabled and token and chat_id:
-                            msg = (
-                                f"🛡️ *BREAKEVEN ENFORCED (تحريك الاستوب لنقطة الدخول)*\n\n"
-                                f"• *Symbol:* `{symbol}`\n"
-                                f"• *Ticket:* #{ticket}\n"
-                                f"• *Action:* `{'BUY' if pos_type == 0 else 'SELL'}`\n"
-                                f"• *Entry Price:* `{entry_price:.5f}`\n"
-                                f"• *Current Price:* `{current_price:.5f}`\n"
-                                f"• *New SL:* `{new_sl:.5f}` (Breakeven)\n\n"
-                                f"⚙️ *Reason:* تم الوصول إلى 50% من الهدف وحماية الصفقة عند نقطة الدخول."
-                            )
-                            send_telegram_message(token, chat_id, msg)
-                    except Exception as tg_err:
-                        print(f"[ERROR] Failed to send Telegram breakeven notification: {tg_err}")
+            # 4. Check 50% Breakeven (Move SL to weighted average entry price)
+            if pct_reached >= 0.50:
+                sl_price = weighted_entry
+                print(f"[BREAKEVEN] Basket for {symbol} reached {pct_reached*100:.1f}% of TP. Moving SL to Entry Breakeven ({sl_price}).")
+                
+            digits = symbol_info.digits
+            tp_price = round(tp_price, digits)
+            sl_price = round(sl_price, digits)
+            
+            for pos in pos_list:
+                if abs(pos.sl - sl_price) > 0.5 * point or abs(pos.tp - tp_price) > 0.5 * point:
+                    print(f"[GRID UPDATE] Modifying SL/TP for position #{pos.ticket}. New SL: {sl_price}, New TP: {tp_price}")
+                    modify_position_sl_tp(pos.ticket, sl_price, tp_price)
 
 
 def check_and_execute_trading_cycle():
@@ -685,11 +675,11 @@ def check_and_execute_trading_cycle():
     # Sync DB positions
     sync_db_with_mt5_positions()
 
-    # Manage active positions (SL to breakeven at 50% TP, and Close early at 90% TP)
+    # Manage active martingale grids (adds legs and recalculates TP/SL dynamically)
     try:
-        manage_active_positions_tp_sl()
+        manage_active_positions_grid()
     except Exception as e:
-        print(f"[ERROR] Active positions TP/SL management failed: {e}")
+        print(f"[ERROR] Grid management failed: {e}")
 
     # Get active positions to check limits
     active_positions = get_open_positions()
@@ -996,9 +986,9 @@ def check_and_execute_trading_cycle():
         # Check if the last closed trade was a Stop Loss and blocks re-entry
         if decision in ["BUY", "SELL"]:
             if is_setup_stopped_out(symbol, gann_context, decision):
-                block_msg = f"Blocked re-entry on {symbol} in direction {decision}. The setup/symbol recently hit Stop Loss."
+                block_msg = f"Blocked re-entry on {symbol} in direction {decision}. The setup/symbol recently hit Stop Loss or was already traded."
                 print(f"[BLOCKED] {block_msg}")
-                last_scan_reports[symbol]["status"] = "Blocked (Stop Loss)"
+                last_scan_reports[symbol]["status"] = "Blocked (Stop Loss / Traded)"
                 last_scan_reports[symbol]["details"] = block_msg
                 continue
 
@@ -1007,7 +997,24 @@ def check_and_execute_trading_cycle():
             print(f"\n🎯 [AI SIGNAL] Triggered {decision} on {symbol}")
             
             reason = trade_params.get("reason", "AI Strategy Entry")
-            if gann_enabled and 'dyn' in locals() and dyn:
+            if grid_enabled and not gann_enabled:
+                grid_sl = float(settings.get("grid_sl", 20.0))
+                grid_tp = float(settings.get("grid_tp", 20.0))
+                symbol_info = mt5.symbol_info(symbol)
+                entry_price = price_info['ask'] if decision == "BUY" else price_info['bid']
+                contract_size = symbol_info.trade_contract_size if symbol_info else 100000.0
+                if contract_size < 1000.0:
+                    pip_size = (0.01 * entry_price) / 10.0
+                else:
+                    pip_size = 0.01 if (symbol.upper().endswith("JPY") or "JPY" in symbol.upper()) else 0.0001
+                
+                # Override SL and TP from database settings
+                sl = entry_price - (grid_sl * pip_size) if decision == "BUY" else entry_price + (grid_sl * pip_size)
+                tp = entry_price + (grid_tp * pip_size) if decision == "BUY" else entry_price - (grid_tp * pip_size)
+                sl = round(sl, symbol_info.digits)
+                tp = round(tp, symbol_info.digits)
+                print(f"[GRID OVERRIDE] Enforcing grid parameters. SL: {sl} ({grid_sl} pips), TP: {tp} ({grid_tp} pips)")
+            elif gann_enabled and 'dyn' in locals() and dyn:
                 sl = dyn["sl_price"]
                 tp = dyn["target_price"]
                 symbol_info = mt5.symbol_info(symbol)
@@ -1054,43 +1061,6 @@ def check_and_execute_trading_cycle():
             # --- DYNAMIC LOT SIZE CALCULATION ---
             volume = calculate_lot_size(symbol, sl, entry_price, risk_percent=risk_percent)
             print(f"[LOTS] Calculated Dynamic Lot: {volume} lots (risking {risk_percent}% of balance)")
-
-            # --- RISK SHIELD GUARD CHECK (MAX 3% LOSS) ---
-            symbol_info = mt5.symbol_info(symbol)
-            if symbol_info:
-                point = symbol_info.point
-                tick_value = symbol_info.trade_tick_value
-                volume_step = symbol_info.volume_step
-                min_volume = symbol_info.volume_min
-                max_volume = symbol_info.volume_max
-                
-                account_info = mt5.account_info()
-                balance = account_info._asdict().get("balance", 0.0) if account_info else 0.0
-                
-                sl_distance_points = abs(entry_price - sl) / point
-                if sl_distance_points > 0 and balance > 0:
-                    estimated_loss = sl_distance_points * volume * tick_value
-                    max_allowed_loss = balance * 0.03 # 3% of balance
-                    
-                    if estimated_loss > max_allowed_loss:
-                        old_volume = volume
-                        # Downscale volume
-                        volume = max_allowed_loss / (sl_distance_points * tick_value)
-                        volume = round(volume / volume_step) * volume_step
-                        volume = max(min_volume, min(volume, max_volume))
-                        volume = round(volume, 2)
-                        
-                        # Re-calculate loss with the new downscaled volume
-                        new_estimated_loss = sl_distance_points * volume * tick_value
-                        print(f"[RISK SHIELD] Estimated loss of ${estimated_loss:.2f} exceeded 3% cap (${max_allowed_loss:.2f}). Downscaling lot from {old_volume} to {volume}.")
-                        
-                        # If even at the absolute minimum volume the risk still exceeds 3%, reject the trade!
-                        if new_estimated_loss > max_allowed_loss:
-                            reject_msg = f"Trade rejected: Minimum volume {volume} lots still risks ${new_estimated_loss:.2f} which exceeds 3% of balance (${max_allowed_loss:.2f})."
-                            print(f"[REJECT] {reject_msg}")
-                            last_scan_reports[symbol]["status"] = "Risk Shield Rejection"
-                            last_scan_reports[symbol]["details"] = reject_msg
-                            continue
 
             if not auto_trade_enabled:
                 manual_msg = f"Signal-Only Mode: Trade was NOT executed. Signal: {decision} on {symbol} at {entry_price} (SL: {sl}, TP: {tp})"
