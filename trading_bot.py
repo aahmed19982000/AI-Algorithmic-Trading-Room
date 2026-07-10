@@ -1242,6 +1242,53 @@ def check_and_execute_trading_cycle():
         print(f"{sym:<12} | {active_str:<13} | {lots_str:<10} | {floating_str:<12} | {win_loss_str:<18} | {closed_profit_str:<16}")
     print("=" * 90)
 
+    # 3. Send Telegram Cycle Report
+    try:
+        from telegram_notifier import get_telegram_config, send_telegram_message
+        enabled, token, chat_id = get_telegram_config()
+        if enabled and token and chat_id:
+            # Active positions summary
+            active_count = len(latest_active)
+            total_lots = sum(pos.volume for pos in latest_active)
+            total_profit = sum(pos.profit for pos in latest_active)
+            
+            # Find signals triggered in this cycle
+            triggered_signals = []
+            for sym, report in last_scan_reports.items():
+                status = report.get("status", "")
+                if "Executed" in status or "AI Approved" in status or "Technical" in status or "Approved" in status:
+                    triggered_signals.append(f"• `{sym}`: {status} ({report.get('details', '')[:100]})")
+                elif "Blocked" in status:
+                    triggered_signals.append(f"• `{sym}`: 🚫 {status}")
+            
+            signals_str = "\n".join(triggered_signals) if triggered_signals else "• لا يوجد إشارات جديدة منفذة"
+            
+            # Format account info
+            balance_val = account_info.get("balance", 0.0)
+            equity_val = account_info.get("equity", 0.0)
+            free_margin = account_info.get("margin_free", 0.0)
+            currency = account_info.get("currency", "USD")
+            
+            report_msg = (
+                f"🔄 *تقرير دورة الفحص (Scanning Cycle Report)*\n"
+                f"⏰ *الوقت:* `{time.strftime('%Y-%m-%d %H:%M:%S')}`\n\n"
+                f"💳 *حالة الحساب (Account Details):*\n"
+                f"• الرصيد (Balance): `{balance_val:.2f} {currency}`\n"
+                f"• السيولة (Equity): `{equity_val:.2f} {currency}`\n"
+                f"• الهامش الحر (Free Margin): `{free_margin:.2f} {currency}`\n\n"
+                f"📈 *الصفقات المفتوحة (Portfolio Status):*\n"
+                f"• إجمالي الصفقات: `{active_count}` صفقات\n"
+                f"• إجمالي العقود: `{total_lots:.2f} lots`\n"
+                f"• الأرباح العائمة: `{total_profit:+.2f} {currency}`\n\n"
+                f"🎯 *أحداث الدورة الحالية (Current Signals):*\n"
+                f"{signals_str}\n\n"
+                f"⚙️ تم فحص {len(symbols_to_trade)} أزواج بنجاح."
+            )
+            send_telegram_message(token, chat_id, report_msg)
+            print("[TELEGRAM] Scanning cycle report sent successfully.")
+    except Exception as tg_report_ex:
+        print(f"[ERROR] Failed to send Telegram cycle report: {tg_report_ex}")
+
     print("\n" + "=" * 60)
     print("🔄 SCANNING CYCLE COMPLETED")
     print("=" * 60)
