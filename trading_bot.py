@@ -879,6 +879,23 @@ def check_and_execute_trading_cycle():
                 reasoning = ai_result.get("reasoning", ai_result.get("reason", "HOLD - AI rejected proposed trade"))
             except Exception as e:
                 print(f"[ERROR] AI analysis failed for {symbol}: {e}")
+                
+                # Send Telegram alert about API failure
+                try:
+                    from telegram_notifier import get_telegram_config, send_telegram_message
+                    enabled, token, chat_id = get_telegram_config()
+                    if enabled and token and chat_id:
+                        tg_error_msg = (
+                            f"⚠️ *GEMINI API ERROR (خطأ في اتصال الذكاء الاصطناعي)*\n\n"
+                            f"• *Symbol:* `{symbol}`\n"
+                            f"• *Error:* `{str(e)}`\n"
+                            f"• *Action:* {'تفعيل التداول الفني البديل (Fallback)' if fallback_to_technical else 'تجاهل الصفقة'}\n\n"
+                            f"⚙️ *Details:* يرجى التحقق من مفتاح الـ API وصلاحيته أو الحد المالي المسموح به (Monthly Spend Cap)."
+                        )
+                        send_telegram_message(token, chat_id, tg_error_msg)
+                except Exception as tg_err:
+                    print(f"[ERROR] Failed to send Telegram API error notification: {tg_err}")
+                    
                 if fallback_to_technical:
                     print(f"[FALLBACK] Gemini API call failed. Falling back to pure technical execution!")
                     decision = proposed_action
