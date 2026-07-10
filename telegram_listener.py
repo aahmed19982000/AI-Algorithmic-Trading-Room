@@ -535,6 +535,9 @@ def telegram_listener_loop():
                         response_text = response_text[:3900] + "\n\n...(truncated)"
                     send_telegram_message(token, configured_chat_id, response_text)
                     
+        except requests.exceptions.RequestException as req_err:
+            print(f"[TG LISTENER] Connection warning: Telegram API request timed out or dropped ({req_err}). Retrying in 5 seconds...")
+            time.sleep(5)
         except Exception as poll_err:
             print(f"[TG LISTENER] [ERROR] Polling loop exception: {poll_err}")
             traceback.print_exc()
