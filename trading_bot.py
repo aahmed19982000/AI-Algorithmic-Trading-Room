@@ -35,6 +35,7 @@ DEFAULT_TIMEFRAME = os.getenv("TRADING_TIMEFRAME", "H4")
 
 # Global dict to store the results of the last scanning cycle per symbol
 last_scan_reports = {}
+last_ai_scan_times = {}
 
 
 def get_db_connection():
@@ -857,6 +858,19 @@ def check_and_execute_trading_cycle():
         reasoning = ""
 
         if ai_evaluation_enabled:
+            # Check if we already did an AI scan for this symbol on the current candle to save API usage
+            current_candle_time = str(candles_df['Time'].iloc[-1])
+            if last_ai_scan_times.get(symbol) == current_candle_time:
+                print(f"[AI CACHE] Already evaluated {symbol} on the current candle ({current_candle_time}). Skipping AI call to save tokens.")
+                decision = "HOLD"
+                last_scan_reports[symbol] = {
+                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                    "status": "AI Cached",
+                    "details": "AI analysis already performed for this candle. Skipping to save API quota.",
+                    "structure": gann_context
+                }
+                continue
+
             try:
                 ai_result = engine.analyze_market(
                     symbol=symbol,
@@ -877,6 +891,9 @@ def check_and_execute_trading_cycle():
                     decision = "HOLD"
                 trade_params = ai_result.get("trade_params")
                 reasoning = ai_result.get("reasoning", ai_result.get("reason", "HOLD - AI rejected proposed trade"))
+                
+                # Record scan timestamp in cache
+                last_ai_scan_times[symbol] = current_candle_time
             except Exception as e:
                 print(f"[ERROR] AI analysis failed for {symbol}: {e}")
                 
