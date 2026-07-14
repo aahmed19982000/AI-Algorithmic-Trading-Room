@@ -686,8 +686,9 @@ def check_and_execute_trading_cycle():
     active_positions = get_open_positions()
     print(f"[ACCOUNT] Active Positions: {len(active_positions)} / {max_positions}")
 
-    # Check Max Positions Limit
-    if len(active_positions) >= max_positions:
+    # Check Max Positions Limit (Flag instead of immediate return to allow report delivery)
+    max_positions_reached = len(active_positions) >= max_positions
+    if max_positions_reached:
         print("[RISK] Maximum positions reached. Skipping analysis to protect margin.")
         for symbol in symbols_to_trade:
             last_scan_reports[symbol] = {
@@ -696,11 +697,10 @@ def check_and_execute_trading_cycle():
                 "details": f"Maximum active positions reached ({len(active_positions)} / {max_positions}).",
                 "structure": None
             }
-        return
 
     # Fetch active news events if filter is enabled
     active_news_events = []
-    if news_filter_enabled:
+    if news_filter_enabled and not max_positions_reached:
         _, active_news_events = is_news_time(minutes_before=30, minutes_after=30)
         if active_news_events:
             print(f"\n[NEWS FILTER] Detected {len(active_news_events)} active high-impact events. Checking symbol exposure...")
@@ -709,14 +709,15 @@ def check_and_execute_trading_cycle():
     open_symbols = [pos.symbol for pos in active_positions]
 
     # Initialize AI Engine (it will dynamically load the strategy prompt from DB)
-    try:
-        engine = AITradingEngine(model_name="gemini-2.5-flash")
-    except Exception as e:
-        print(f"[ERROR] Failed to initialize AI Engine: {e}")
-        return
+    if not max_positions_reached:
+        try:
+            engine = AITradingEngine(model_name="gemini-2.5-flash")
+        except Exception as e:
+            print(f"[ERROR] Failed to initialize AI Engine: {e}")
+            return
 
     # 3. Analyze each symbol
-    for symbol in symbols_to_trade:
+    for symbol in ([] if max_positions_reached else symbols_to_trade):
         print(f"\n--------------------------------------------------")
         print(f"🔎 Scanning symbol: {symbol}")
         print(f"--------------------------------------------------")
