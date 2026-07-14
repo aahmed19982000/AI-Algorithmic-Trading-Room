@@ -857,8 +857,166 @@ def check_and_execute_trading_cycle():
                 "sl_price": dyn["sl_price"]
             }
             print(f"[GANN SETUP] Valid {setup['type']} structure: A={setup['A']}, B={setup['B']}, C={setup['C']} (Retracement: {retr_pct:.1f}%)")
+
+            # --- ADVANCED TECHNICAL FILTERS (LIKE GEMINI) ---
+            # Calculate ATR for Volatility filter
+            import pandas as pd
+            df_temp = candles_df.copy()
+            high_low = df_temp['High'] - df_temp['Low']
+            high_close = (df_temp['High'] - df_temp['Close'].shift()).abs()
+            low_close = (df_temp['Low'] - df_temp['Close'].shift()).abs()
+            ranges = pd.concat([high_low, high_close, low_close], axis=1)
+            true_range = ranges.max(axis=1)
+            df_temp['atr'] = true_range.rolling(14).mean()
+            
+            # Calculate RSI for Momentum/Divergence filter
+            delta = df_temp['Close'].diff()
+            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+            rs = gain / loss
+            df_temp['rsi14'] = 100 - (100 / (1 + rs))
+
+            current_atr = df_temp['atr'].iloc[-2]
+            avg_atr = df_temp['atr'].tail(100).mean()
+            current_rsi = df_temp['rsi14'].iloc[-2]
+            prev_rsi = df_temp['rsi14'].iloc[-3]
+            
+            last_close = df_temp['Close'].iloc[-2]
+            last_open = df_temp['Open'].iloc[-2]
+            last_high = df_temp['High'].iloc[-2]
+            last_low = df_temp['Low'].iloc[-2]
+            
+            # 1. Volatility Filter Check
+            if pd.notna(current_atr) and pd.notna(avg_atr):
+                if current_atr > 2.5 * avg_atr:
+                    filter_msg = f"ATR Volatility filter: High volatility warning (ATR: {current_atr:.5f} > 2.5 * Avg: {avg_atr:.5f})."
+                    print(f"[FILTER] {symbol} rejected: {filter_msg}")
+                    last_scan_reports[symbol] = {
+                        "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                        "status": "No Setup",
+                        "details": filter_msg,
+                        "structure": gann_context
+                    }
+                    continue
+                elif current_atr < 0.3 * avg_atr:
+                    filter_msg = f"ATR Volatility filter: Flat market warning (ATR: {current_atr:.5f} < 0.3 * Avg: {avg_atr:.5f})."
+                    print(f"[FILTER] {symbol} rejected: {filter_msg}")
+                    last_scan_reports[symbol] = {
+                        "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                        "status": "No Setup",
+                        "details": filter_msg,
+                        "structure": gann_context
+                    }
+                    continue
+
+            # 2. Breakout and False Breakout Confirmation Check
+            is_breakout = False
+            breakout_reason = ""
+            if setup["type"] == "BUY":
+                if last_close > setup["B"]:
+                    is_breakout = True
+                else:
+                    breakout_reason = f"Breakout filter: Close ({last_close:.5f}) is not above High B ({setup['B']:.5f}) yet."
+            else: # SELL
+                if last_close < setup["B"]:
+                    is_breakout = True
+                else:
+                    breakout_reason = f"Breakout filter: Close ({last_close:.5f}) is not below Low B ({setup['B']:.5f}) yet."
+
+            if not is_breakout:
+                print(f"[FILTER] {symbol} rejected: {breakout_reason}")
+                last_scan_reports[symbol] = {
+                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                    "status": "No Setup",
+                    "details": breakout_reason,
+                    "structure": gann_context
+                }
+                continue
+
+            # 3. Momentum & Divergence Check (RSI)
+            is_rsi_valid = True
+            rsi_reason = ""
+            if pd.notna(current_rsi) and pd.notna(prev_rsi):
+                if setup["type"] == "BUY":
+                    if current_rsi > 70:
+                        is_rsi_valid = False
+                        rsi_reason = f"RSI filter: Overbought warning (RSI {current_rsi:.1f} > 70)."
+                    elif current_rsi <= prev_rsi:
+                        is_rsi_valid = False
+                        rsi_reason = f"RSI filter: Falling momentum (RSI {current_rsi:.1f} <= {prev_rsi:.1f})."
+                else: # SELL
+                    if current_rsi < 30:
+                        is_rsi_valid = False
+                        rsi_reason = f"RSI filter: Oversold warning (RSI {current_rsi:.1f} < 30)."
+                    elif current_rsi >= prev_rsi:
+                        is_rsi_valid = False
+                        rsi_reason = f"RSI filter: Rising momentum (RSI {current_rsi:.1f} >= {prev_rsi:.1f})."
+
+            if not is_rsi_valid:
+                print(f"[FILTER] {symbol} rejected: {rsi_reason}")
+                last_scan_reports[symbol] = {
+                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                    "status": "No Setup",
+                    "details": rsi_reason,
+                    "structure": gann_context
+                }
+                continue
+
+            # 4. Price Action confirmation check
+            candle_body = abs(last_close - last_open)
+            candle_range = last_high - last_low
+            is_valid_pa = False
+            pa_detail = ""
+            
+            if candle_range > 0:
+                upper_wick = last_high - max(last_close, last_open)
+                lower_wick = min(last_close, last_open) - last_low
+                
+                prev_close = df_temp['Close'].iloc[-3]
+                prev_open = df_temp['Open'].iloc[-3]
+                
+                if setup["type"] == "BUY":
+                    is_bullish_engulfing = (last_close > last_open) and (prev_close < prev_open) and (last_close >= prev_open) and (last_open <= prev_close)
+                    is_bullish_pinbar = (lower_wick >= 2.0 * candle_body) and (upper_wick <= 0.5 * lower_wick)
+                    is_strong_breakout = (last_close > last_open) and ((last_high - last_close) / candle_range <= 0.3)
+                    
+                    if is_bullish_engulfing:
+                        is_valid_pa = True
+                        pa_detail = "Bullish Engulfing pattern"
+                    elif is_bullish_pinbar:
+                        is_valid_pa = True
+                        pa_detail = "Bullish Pin Bar pattern"
+                    elif is_strong_breakout:
+                        is_valid_pa = True
+                        pa_detail = "Strong bullish breakout candle"
+                else: # SELL
+                    is_bearish_engulfing = (last_close < last_open) and (prev_close > prev_open) and (last_close <= prev_open) and (last_open >= prev_close)
+                    is_bearish_pinbar = (upper_wick >= 2.0 * candle_body) and (lower_wick <= 0.5 * upper_wick)
+                    is_strong_breakout = (last_close < last_open) and ((last_close - last_low) / candle_range <= 0.3)
+                    
+                    if is_bearish_engulfing:
+                        is_valid_pa = True
+                        pa_detail = "Bearish Engulfing pattern"
+                    elif is_bearish_pinbar:
+                        is_valid_pa = True
+                        pa_detail = "Bearish Pin Bar pattern"
+                    elif is_strong_breakout:
+                        is_valid_pa = True
+                        pa_detail = "Strong bearish breakout candle"
+
+            if not is_valid_pa:
+                filter_msg = "Price Action filter: Breakout candle lacks bullish/bearish pattern strength."
+                print(f"[FILTER] {symbol} rejected: {filter_msg}")
+                last_scan_reports[symbol] = {
+                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                    "status": "No Setup",
+                    "details": filter_msg,
+                    "structure": gann_context
+                }
+                continue
+
             proposed_action = setup["type"]
-            technical_reason = f"Gann breakout {proposed_action} pivot setup."
+            technical_reason = f"Gann breakout {proposed_action} pivot setup with {pa_detail} confirmation."
         else:
             proposed_action, technical_reason = check_technical_strategy_signals(candles_df, symbol)
 
