@@ -571,14 +571,19 @@ def manage_active_positions_grid():
             total_vol = sum(p.volume for p in pos_list)
             weighted_entry = sum(p.price_open * p.volume for p in pos_list) / total_vol
             
-            if len(pos_list) == 1:
-                grid_tp = float(settings.get("grid_tp", 20.0))
-                tp_price = weighted_entry + (grid_tp * pip_size) if basket_type == 'BUY' else weighted_entry - (grid_tp * pip_size)
+            is_gann_trade = any("gann" in (pos.comment or "").lower() for pos in pos_list)
+
+            if is_gann_trade and pos_list[0].tp > 0:
+                tp_price = pos_list[0].tp
+                print(f"[GRID INFO] Gann trade detected. Preserving oldest TP price: {tp_price}")
             else:
-                tp_price = weighted_entry + (target_profit * pip_size) if basket_type == 'BUY' else weighted_entry - (target_profit * pip_size)
+                if len(pos_list) == 1:
+                    grid_tp = float(settings.get("grid_tp", 20.0))
+                    tp_price = weighted_entry + (grid_tp * pip_size) if basket_type == 'BUY' else weighted_entry - (grid_tp * pip_size)
+                else:
+                    tp_price = weighted_entry + (target_profit * pip_size) if basket_type == 'BUY' else weighted_entry - (target_profit * pip_size)
                 
             last_entry_price = pos_list[-1].price_open
-            is_gann_trade = any("gann" in (pos.comment or "").lower() for pos in pos_list)
             
             if is_gann_trade and pos_list[0].sl > 0:
                 sl_price = pos_list[0].sl
