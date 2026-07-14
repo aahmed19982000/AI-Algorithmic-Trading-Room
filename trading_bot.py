@@ -686,15 +686,34 @@ def check_and_execute_trading_cycle():
     active_positions = get_open_positions()
     print(f"[ACCOUNT] Active Positions: {len(active_positions)} / {max_positions}")
 
+    # --- PORTFOLIO RISK CONTROL CHECKS (Local Python implementation) ---
+    balance = float(account_info.get("balance", 0.0))
+    equity = float(account_info.get("equity", 0.0))
+    floating_dd_pct = ((balance - equity) / balance) * 100.0 if balance > 0 else 0.0
+    margin_level = float(account_info.get("margin_level", 1000.0))
+
+    portfolio_risk_blocked = False
+    portfolio_block_reason = ""
+
+    if floating_dd_pct > 5.0:
+        portfolio_risk_blocked = True
+        portfolio_block_reason = f"Total portfolio floating drawdown ({floating_dd_pct:.2f}%) exceeds 5.0% limit."
+        print(f"[PORTFOLIO RISK BLOCK] {portfolio_block_reason}")
+    elif margin_level < 300.0:
+        portfolio_risk_blocked = True
+        portfolio_block_reason = f"Margin Level ({margin_level:.1f}%) is below 300.0% safety threshold."
+        print(f"[PORTFOLIO RISK BLOCK] {portfolio_block_reason}")
+
     # Check Max Positions Limit (Flag instead of immediate return to allow report delivery)
-    max_positions_reached = len(active_positions) >= max_positions
+    max_positions_reached = len(active_positions) >= max_positions or portfolio_risk_blocked
     if max_positions_reached:
-        print("[RISK] Maximum positions reached. Skipping analysis to protect margin.")
+        details_msg = portfolio_block_reason if portfolio_risk_blocked else f"Maximum active positions reached ({len(active_positions)} / {max_positions})."
+        print(f"[RISK] Skipping analysis to protect margin: {details_msg}")
         for symbol in symbols_to_trade:
             last_scan_reports[symbol] = {
                 "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
-                "status": "Skipped (Max Positions)",
-                "details": f"Maximum active positions reached ({len(active_positions)} / {max_positions}).",
+                "status": "Skipped (Risk/Max Positions)",
+                "details": details_msg,
                 "structure": None
             }
 
@@ -870,6 +889,38 @@ def check_and_execute_trading_cycle():
                 "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
                 "status": "Already Open",
                 "details": skip_msg,
+                "structure": gann_context
+            }
+            continue
+
+        # 1.5. Correlation & Drawdown Safety Check
+        # Resolve base currencies to check for correlation (e.g. EUR, GBP, USD, CHF, JPY)
+        base_currencies = ["EUR", "GBP", "USD", "CHF", "JPY", "AUD", "CAD", "NZD"]
+        symbol_base_currencies = [c for c in base_currencies if c in symbol.upper()]
+        
+        has_correlated_drawdown = False
+        correlated_symbol_name = ""
+        
+        for pos in active_positions:
+            if pos.magic == MAGIC_NUMBER and pos.profit < 0: # Active trade in drawdown
+                # Check base currency overlap
+                pos_base_currencies = [c for c in base_currencies if c in pos.symbol.upper()]
+                overlap = set(symbol_base_currencies).intersection(set(pos_base_currencies))
+                
+                # Check if it shares a key currency and is in the same direction (e.g. USD exposure drawdown)
+                pos_type_str = "BUY" if pos.type == mt5.POSITION_TYPE_BUY else "SELL"
+                if len(overlap) > 0 and pos_type_str == proposed_action:
+                    has_correlated_drawdown = True
+                    correlated_symbol_name = pos.symbol
+                    break
+
+        if has_correlated_drawdown:
+            corr_msg = f"Correlation Block: There is an active position on {correlated_symbol_name} in drawdown. Skipping entry on {symbol} to control risk."
+            print(f"[CORRELATION BLOCK] {corr_msg}")
+            last_scan_reports[symbol] = {
+                "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                "status": "Correlation Blocked",
+                "details": corr_msg,
                 "structure": gann_context
             }
             continue
