@@ -1323,6 +1323,16 @@ def check_and_execute_trading_cycle():
             
             ai_err_str = f"\n⚠️ *خطأ اتصال الذكاء الاصطناعي (Gemini):* فشل الاتصال لـ `{ai_failure_count}` أزواج (تم تفعيل البديل الفني)." if ai_failure_count > 0 else ""
 
+            # Token usage details
+            usage_str = ""
+            if cycle_in_tokens > 0 or cycle_out_tokens > 0:
+                usage_str = (
+                    f"📊 *استهلاك الذكاء الاصطناعي (AI Token Usage):*\n"
+                    f"• الـ Tokens المرسلة (Input): `{cycle_in_tokens}` Tokens\n"
+                    f"• الـ Tokens المستلمة (Output): `{cycle_out_tokens}` Tokens\n"
+                    f"• التكلفة التقديرية للدورة: `${cycle_cost:.5f} USD`\n\n"
+                )
+
             report_msg = (
                 f"🔄 *تقرير دورة الفحص (Scanning Cycle Report)*\n"
                 f"⏰ *الوقت:* `{time.strftime('%Y-%m-%d %H:%M:%S')}`\n\n"
@@ -1334,6 +1344,7 @@ def check_and_execute_trading_cycle():
                 f"• إجمالي الصفقات: `{active_count}` صفقات\n"
                 f"• إجمالي العقود: `{total_lots:.2f} lots`\n"
                 f"• الأرباح العائمة: `{total_profit:+.2f} {currency}`\n\n"
+                f"{usage_str}"
                 f"🎯 *أحداث الدورة الحالية (Current Signals):*\n"
                 f"{signals_str}\n{ai_err_str}\n"
                 f"⚙️ تم فحص {len(symbols_to_trade)} أزواج بنجاح."

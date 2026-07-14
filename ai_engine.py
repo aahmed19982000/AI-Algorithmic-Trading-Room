@@ -233,6 +233,22 @@ If you decide to HOLD, explain why in text.
             "raw_response": response
         }
 
+        # Extract Token usage metadata if available
+        try:
+            if hasattr(response, "usage_metadata") and response.usage_metadata:
+                in_tokens = response.usage_metadata.prompt_token_count
+                out_tokens = response.usage_metadata.candidates_token_count
+                # Cost calculation: Input is $0.075 / 1M tokens, Output is $0.30 / 1M tokens for Flash 2.5
+                cost = (in_tokens * (0.075 / 1000000.0)) + (out_tokens * (0.30 / 1000000.0))
+                result["usage"] = {
+                    "in_tokens": in_tokens,
+                    "out_tokens": out_tokens,
+                    "cost": cost
+                }
+                print(f"[AI USAGE] Prompt: {in_tokens} | Candidates: {out_tokens} | Cost: ${cost:.6f}")
+        except Exception as ue:
+            print(f"[WARNING] Could not parse token usage metadata: {ue}")
+
         # Check each part of the response
         for candidate in response.candidates:
             for part in candidate.content.parts:
