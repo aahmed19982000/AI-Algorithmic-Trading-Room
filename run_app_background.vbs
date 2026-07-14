@@ -2,17 +2,50 @@ Set WshShell = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
 currentDir = fso.GetParentFolderName(WScript.ScriptFullName)
 
-venvPython = currentDir & "\venv\Scripts\python.exe"
-globalPython = "C:\Users\Administrator\AppData\Local\Programs\Python\Python314\python.exe"
+Function FindPython()
+    ' 1. Check local venv
+    Dim localVenv
+    localVenv = currentDir & "\venv\Scripts\python.exe"
+    If fso.FileExists(localVenv) Then
+        FindPython = localVenv
+        Exit Function
+    End If
+    
+    ' 2. Try AppData Programs folder
+    Dim localAppData, pythonFolder
+    localAppData = WshShell.ExpandEnvironmentStrings("%LocalAppData%")
+    pythonFolder = localAppData & "\Programs\Python"
+    If fso.FolderExists(pythonFolder) Then
+        Dim parentFolder, subFolder, exePath
+        Set parentFolder = fso.GetFolder(pythonFolder)
+        For Each subFolder In parentFolder.SubFolders
+            exePath = subFolder.Path & "\python.exe"
+            If fso.FileExists(exePath) Then
+                FindPython = exePath
+                Exit Function
+            End If
+        Next
+    End If
+    
+    ' 3. Check registry for common versions
+    Dim regPath, val, ver
+    On Error Resume Next
+    For Each ver In Array("3.14", "3.13", "3.12", "3.11", "3.10", "3.9")
+        regPath = "HKEY_CURRENT_USER\Software\Python\PythonCore\" & ver & "\InstallPath\"
+        val = WshShell.RegRead(regPath)
+        If Err.Number = 0 And val <> "" Then
+            FindPython = val & "python.exe"
+            Exit Function
+        End If
+        Err.Clear
+    Next
+    On Error GoTo 0
+    
+    ' 4. Fallback to system path
+    FindPython = "python.exe"
+End Function
 
-If fso.FileExists(venvPython) Then
-    pythonExe = venvPython
-ElseIf fso.FileExists(globalPython) Then
-    pythonExe = globalPython
-Else
-    pythonExe = "python"
-End If
-
+pythonExe = FindPython()
 scriptFile = currentDir & "\app.py"
 WshShell.Run """" & pythonExe & """ """ & scriptFile & """", 0, False
 
