@@ -484,7 +484,7 @@ def telegram_listener_loop():
                 user_msg_lower = user_msg.lower()
                 
                 # Process commands
-                if user_msg_lower.startswith("/start") or user_msg_lower.startswith("/help"):
+                if (user_msg_lower.startswith("/start") and not user_msg_lower.startswith("/start_trade")) or user_msg_lower.startswith("/help"):
                     help_msg = (
                         "🚀 *مرحباً بك في المحلل الفني للذكاء الاصطناعي!* 📊\n\n"
                         "يمكنك مراقبة البوت والتحكم فيه والدردشة مع المحلل مباشرة عبر الأوامر التالية:\n\n"
