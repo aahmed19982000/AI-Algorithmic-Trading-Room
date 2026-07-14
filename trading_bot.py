@@ -984,7 +984,7 @@ def check_and_execute_trading_cycle():
                 else:
                     decision = "HOLD"
                 trade_params = ai_result.get("trade_params")
-                reasoning = ai_result.get("reasoning", ai_result.get("reason", "HOLD - AI rejected proposed trade"))
+                reasoning = ai_result.get("analysis", "HOLD - AI rejected proposed trade")
                 
                 # Record scan timestamp in cache
                 last_ai_scan_times[symbol] = current_candle_time
