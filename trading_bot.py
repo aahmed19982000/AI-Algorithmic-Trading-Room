@@ -464,11 +464,10 @@ def manage_active_positions_grid():
     Monitors active positions in MetaTrader 5.
     If a position goes into drawdown by grid_step, opens the next Martingale grid leg
     and modifies the TP/SL of all active legs of that symbol.
+    Also handles general trade protections (50% Breakeven, 90% Early Close) regardless of grid settings.
     """
     settings = get_settings()
     grid_enabled = int(settings.get("grid_enabled", 1)) == 1
-    if not grid_enabled:
-        return
 
     grid_step = float(settings.get("grid_step", 10.0))
     multiplier = float(settings.get("grid_multiplier", 2.0))
@@ -525,10 +524,10 @@ def manage_active_positions_grid():
         else:
             drawdown_pips = (tick.ask - last_entry) * pip_multiplier
 
-        print(f"[GRID INFO] Symbol {symbol} has {len(pos_list)} active legs. Drawdown from last leg: {drawdown_pips:.1f} pips.")
+        print(f"[PROTECTION INFO] Symbol {symbol} has {len(pos_list)} active trades. Current profit/drawdown pips from last trade: {-drawdown_pips:.1f} pips.")
 
-        # Check if we need to open the next leg
-        if drawdown_pips >= grid_step:
+        # Check if we need to open the next leg (ONLY if Grid is explicitly enabled)
+        if grid_enabled and drawdown_pips >= grid_step:
             if len(pos_list) < max_legs:
                 print(f"[GRID TRIGGER] Drawdown ({drawdown_pips:.1f} pips) >= Grid Step ({grid_step} pips). Opening next leg!")
                 
