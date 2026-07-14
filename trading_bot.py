@@ -1315,6 +1315,8 @@ def check_and_execute_trading_cycle():
                     triggered_signals.append(f"• `{sym}`: {status} ({report.get('details', '')[:100]})")
                 elif "Blocked" in status:
                     triggered_signals.append(f"• `{sym}`: 🚫 {status}")
+                elif status == "News Frozen":
+                    triggered_signals.append(f"• `{sym}`: 📰 *مجمّد بسبب الأخبار (News Frozen)*")
             
             signals_str = "\n".join(triggered_signals) if triggered_signals else "• لا يوجد إشارات جديدة منفذة"
             
