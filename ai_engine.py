@@ -32,23 +32,15 @@ genai.configure(api_key=GEMINI_API_KEY)
 # ============================================================
 
 SYSTEM_PROMPT = """
-You are a professional Forex trading risk analyst and portfolio evaluator AI.
-Your main role is to assess market conditions and evaluate proposed trade setups to protect account capital.
+You are a professional Forex trading analyst.
+Your main role is to assess market conditions and evaluate proposed trade setups based on technical structures and candlestick patterns.
 
 ## YOUR RESPONSIBILITIES:
-1. Evaluate proposed trade signals (BUY/SELL) against risk rules and market environments.
+1. Evaluate proposed trade signals (BUY/SELL) against technical candle behaviors.
 2. Analyze candlestick data, support/resistance levels, trend stability, and spreads.
 3. Decide whether to APPROVE or REJECT the proposed trade signal.
 4. If you APPROVE the trade: call the `open_trade` function.
-5. If you REJECT the trade: respond with text starting with "REJECT - [reason]" and explain the risk elements that caused the rejection.
-
-## PORTFOLIO RISK RULES (MANDATORY):
-1. **Stop Loss is ALWAYS required** - Never approve a trade without a Stop Loss (SL).
-2. **Risk/Reward Ratio**: Minimum 1:1.5 (TP must be at least 1.5x the SL distance) unless overriding parameters are enforced by the system.
-3. **Total Drawdown Cap**: If the portfolio has active trades and the total floating loss exceeds 5.0% of the account balance, you MUST reject new entries.
-4. **Correlation Limit**: Do not open a new position on a symbol in the same direction if there is already an active position on a highly correlated currency pair that is currently in a drawdown.
-5. **Margin Safety**: Verify that the account's Margin Level is at least 300% (if active trades exist). Reject entries if it falls below 300%.
-6. **Market Quality**: Do not trade if the spread is too wide, or if volatility is excessively high/unstable (e.g. during major news).
+5. If you REJECT the trade: respond with text starting with "REJECT - [reason]" and explain the technical reason.
 
 ## OUTPUT RULES:
 - To APPROVE a trade: Call the `open_trade` function.
@@ -172,83 +164,17 @@ class AITradingEngine:
             }
 
     def _build_prompt(self, symbol, timeframe, candles_data, account_info, current_price, gann_context=None, active_positions=None, proposed_action=None):
-        """Build the market analysis prompt."""
-        # Format active positions details
-        positions_str = "No active open positions."
-        if active_positions:
-            pos_lines = []
-            total_floating_profit = 0.0
-            for pos in active_positions:
-                if hasattr(pos, 'ticket'):
-                    ticket = pos.ticket
-                    sym = pos.symbol
-                    pos_type = "BUY" if pos.type == 0 else "SELL"
-                    vol = pos.volume
-                    p_open = pos.price_open
-                    p_curr = pos.price_current
-                    profit = pos.profit
-                    sl = pos.sl
-                    tp = pos.tp
-                    comment = getattr(pos, 'comment', '')
-                else:
-                    ticket = pos.get('ticket', 'N/A')
-                    sym = pos.get('symbol', 'N/A')
-                    pos_type = pos.get('action', pos.get('type', 'BUY')).upper()
-                    if pos_type in [0, '0']:
-                        pos_type = 'BUY'
-                    elif pos_type in [1, '1']:
-                        pos_type = 'SELL'
-                    vol = pos.get('volume', 0.01)
-                    p_open = pos.get('entry_price', pos.get('price_open', 0.0))
-                    p_curr = pos.get('close_price', pos.get('price_current', 0.0))
-                    profit = pos.get('profit', 0.0)
-                    sl = pos.get('sl', 0.0)
-                    tp = pos.get('tp', 0.0)
-                    comment = pos.get('reason', pos.get('comment', ''))
-
-                total_floating_profit += profit
-                pos_lines.append(
-                    f"- Ticket #{ticket} | {sym} | {pos_type} | {vol} lots | Entry Price: {p_open:.5f} | Current Price: {p_curr:.5f} | Profit: ${profit:+.2f} | SL: {sl:.5f} | TP: {tp:.5f} | Comment: {comment}"
-                )
-            positions_str = "\n".join(pos_lines)
-            balance = account_info.get('balance', 0.0)
-            if balance > 0:
-                dd_pct = (-total_floating_profit / balance) * 100.0 if total_floating_profit < 0 else 0.0
-            else:
-                dd_pct = 0.0
-            positions_str += f"\n\nTotal Floating Profit/Loss: ${total_floating_profit:+.2f}\nTotal Portfolio Floating Drawdown: {dd_pct:.2f}%"
-
-        # Format Margin Level string
-        margin_level = account_info.get('margin_level')
-        if margin_level is None or margin_level == 0.0:
-            margin_level_str = "N/A (No active trades, unlimited margin)"
-        else:
-            try:
-                margin_level_str = f"{float(margin_level):.1f}%"
-            except Exception:
-                margin_level_str = f"{margin_level}%"
-
+        """Build the market analysis prompt without account data to save tokens."""
         prompt = f"""
 ## MARKET DATA FOR ANALYSIS
 
 **Symbol:** {symbol}
 **Timeframe:** {timeframe}
-**Current Time:** Now
 
 ### Current Price:
 - Bid: {current_price.get('bid', 'N/A')}
 - Ask: {current_price.get('ask', 'N/A')}
 - Spread: {current_price.get('spread', 'N/A')} pips
-
-### Account Status:
-- Balance: {account_info.get('balance', 'N/A')} {account_info.get('currency', 'USD')}
-- Equity: {account_info.get('equity', 'N/A')} {account_info.get('currency', 'USD')}
-- Free Margin: {account_info.get('margin_free', 'N/A')} {account_info.get('currency', 'USD')}
-- Margin Level: {margin_level_str}
-- Leverage: 1:{account_info.get('leverage', 'N/A')}
-
-### PORTFOLIO STATE (ACTIVE OPEN POSITIONS)
-{positions_str}
 """
         if gann_context:
             prompt += f"""
