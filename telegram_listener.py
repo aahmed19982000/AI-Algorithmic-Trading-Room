@@ -477,7 +477,8 @@ def telegram_listener_loop():
                         "• `/status` - لعرض الرصيد والصفقات المفتوحة حالياً.\n"
                         "• `/trades` - لعرض آخر 5 صفقات منفذة وتفاصيل أرباحها.\n"
                         "• `/analyze <الرمز>` - لإجراء تحليل فني مباشر وفوري لأي زوج عملات أو رمز مالي.\n"
-                        "  _مثال: `/analyze EURUSDm` أو `/analyze BTCUSDm`_\n"
+                        "• `/stop` - لإيقاف التداول التلقائي فوراً (تعطيل الصفقات الجديدة).\n"
+                        "• `/start_trade` - لتفعيل التداول التلقائي مجدداً.\n\n"
                         "• *أي رسالة نصية أخرى* - سيتم اعتبارها دردشة وسيجيبك المحلل الفني بالاعتماد على سياق تداولاتك الحالية والتاريخية وبشكل ذكي.\n"
                     )
                     send_telegram_message(token, configured_chat_id, help_msg)
@@ -493,6 +494,22 @@ def telegram_listener_loop():
                     parts = user_msg.split(maxsplit=1)
                     symbol_arg = parts[1] if len(parts) > 1 else ""
                     handle_analyze_command(token, configured_chat_id, symbol_arg)
+                    
+                elif user_msg_lower.startswith("/stop"):
+                    try:
+                        from db_manager import save_settings
+                        save_settings({"auto_trade": "0"})
+                        send_telegram_message(token, configured_chat_id, "⏹️ *تم إيقاف التداول التلقائي بنجاح.* لن يفتح البوت أي صفقات جديدة حتى تقوم بالتفعيل مجدداً.")
+                    except Exception as e:
+                        send_telegram_message(token, configured_chat_id, f"❌ *فشل إيقاف التداول:* `{str(e)}`")
+
+                elif user_msg_lower.startswith("/start_trade"):
+                    try:
+                        from db_manager import save_settings
+                        save_settings({"auto_trade": "1"})
+                        send_telegram_message(token, configured_chat_id, "🚀 *تم تفعيل التداول التلقائي بنجاح!* سيبدأ البوت بالبحث عن صفقات جديدة وتنفيذها تلقائياً.")
+                    except Exception as e:
+                        send_telegram_message(token, configured_chat_id, f"❌ *فشل تفعيل التداول:* `{str(e)}`")
                     
                 else:
                     # Check if the user is asking to analyze a symbol in natural language

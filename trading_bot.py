@@ -982,38 +982,35 @@ def check_and_execute_trading_cycle():
             except Exception as e:
                 print(f"[ERROR] AI analysis failed for {symbol}: {e}")
                 ai_failure_count += 1
+                
+                # Temporarily disable auto_trade to stop further trades until user reviews
+                try:
+                    from db_manager import save_settings
+                    save_settings({"auto_trade": "0"})
                     
-                if fallback_to_technical:
-                    print(f"[FALLBACK] Gemini API call failed. Falling back to pure technical execution!")
-                    decision = proposed_action
-                    
-                    # Calculate default SL/TP (20 pips / 30 pips) if not overridden later
-                    symbol_info = mt5.symbol_info(symbol)
-                    entry_price = price_info['ask'] if proposed_action == "BUY" else price_info['bid']
-                    pip_size = 0.01 if (symbol.upper().endswith("JPY") or "JPY" in symbol.upper()) else 0.0001
-                    sl = entry_price - (20.0 * pip_size) if proposed_action == "BUY" else entry_price + (20.0 * pip_size)
-                    tp = entry_price + (30.0 * pip_size) if proposed_action == "BUY" else entry_price - (30.0 * pip_size)
-                    if symbol_info:
-                        sl = round(sl, symbol_info.digits)
-                        tp = round(tp, symbol_info.digits)
-                        
-                    trade_params = {
-                        "action": proposed_action,
-                        "symbol": symbol,
-                        "volume": 0.01,
-                        "sl": sl,
-                        "tp": tp,
-                        "reason": f"Fallback: {technical_reason}"
-                    }
-                    reasoning = f"Gemini API error ({str(e)}). Executing technical fallback: {proposed_action}. Details: {technical_reason}"
-                else:
-                    last_scan_reports[symbol] = {
-                        "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
-                        "status": "Error",
-                        "details": f"Gemini AI API call failed: {str(e)} and fallback is disabled.",
-                        "structure": gann_context
-                    }
-                    continue
+                    from telegram_notifier import get_telegram_config, send_telegram_message
+                    enabled, token, chat_id = get_telegram_config()
+                    if enabled and token and chat_id:
+                        err_alert = (
+                            f"🚨 *فشل الاتصال بـ Gemini (Gemini Connection Failed)*\n\n"
+                            f"• *الزوج:* `{symbol}`\n"
+                            f"• *نوع الخطأ:* `{str(e)[:150]}`\n\n"
+                            f"🛑 *قرار الحماية:* تم إيقاف التداول التلقائي تلقائياً لحماية حسابك من التداول الفني العشوائي.\n"
+                            f"💬 لتفعيل التداول الفني البديل يدوياً أرسل `/start_trade`."
+                        )
+                        send_telegram_message(token, chat_id, err_alert)
+                except Exception as db_err:
+                    print(f"[ERROR] Failed to save disabled trade state or send alert: {db_err}")
+
+                last_scan_reports[symbol] = {
+                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                    "status": "Error (Halted)",
+                    "details": f"Gemini AI API call failed: {str(e)}. Trading halted.",
+                    "structure": gann_context
+                }
+                # Force max_positions_reached to True to skip other pairs in this cycle
+                max_positions_reached = True
+                continue
         else:
             print("[INFO] AI Risk Evaluation disabled. Executing purely based on technical strategy.")
             decision = proposed_action
