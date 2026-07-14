@@ -801,7 +801,7 @@ def check_and_execute_trading_cycle():
             continue
 
         # Fetch count
-        count_to_fetch = max(50, gann_lookback + 10)
+        count_to_fetch = max(300, gann_lookback + 10)
         candles_df = get_candles(symbol=symbol, timeframe=tf_constant, count=count_to_fetch)
         if candles_df is None or len(candles_df) < 10:
             print(f"[ERROR] Not enough candle data for {symbol}. Skipping.")
