@@ -636,6 +636,7 @@ def check_and_execute_trading_cycle():
     print(f"🔄 STARTING SCANNING CYCLE: {time.strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
     last_scan_reports.clear()
+    ai_failure_count = 0
 
     # 1. Load Settings from SQLite Database
     settings = get_settings()
@@ -929,22 +930,7 @@ def check_and_execute_trading_cycle():
                 last_ai_scan_times[symbol] = current_candle_time
             except Exception as e:
                 print(f"[ERROR] AI analysis failed for {symbol}: {e}")
-                
-                # Send Telegram alert about API failure
-                try:
-                    from telegram_notifier import get_telegram_config, send_telegram_message
-                    enabled, token, chat_id = get_telegram_config()
-                    if enabled and token and chat_id:
-                        tg_error_msg = (
-                            f"⚠️ *GEMINI API ERROR (خطأ في اتصال الذكاء الاصطناعي)*\n\n"
-                            f"• *Symbol:* `{symbol}`\n"
-                            f"• *Error:* `{str(e)}`\n"
-                            f"• *Action:* {'تفعيل التداول الفني البديل (Fallback)' if fallback_to_technical else 'تجاهل الصفقة'}\n\n"
-                            f"⚙️ *Details:* يرجى التحقق من مفتاح الـ API وصلاحيته أو الحد المالي المسموح به (Monthly Spend Cap)."
-                        )
-                        send_telegram_message(token, chat_id, tg_error_msg)
-                except Exception as tg_err:
-                    print(f"[ERROR] Failed to send Telegram API error notification: {tg_err}")
+                ai_failure_count += 1
                     
                 if fallback_to_technical:
                     print(f"[FALLBACK] Gemini API call failed. Falling back to pure technical execution!")
@@ -1287,6 +1273,8 @@ def check_and_execute_trading_cycle():
             free_margin = account_info.get("margin_free", 0.0)
             currency = account_info.get("currency", "USD")
             
+            ai_err_str = f"\n⚠️ *خطأ اتصال الذكاء الاصطناعي (Gemini):* فشل الاتصال لـ `{ai_failure_count}` أزواج (تم تفعيل البديل الفني)." if ai_failure_count > 0 else ""
+
             report_msg = (
                 f"🔄 *تقرير دورة الفحص (Scanning Cycle Report)*\n"
                 f"⏰ *الوقت:* `{time.strftime('%Y-%m-%d %H:%M:%S')}`\n\n"
@@ -1299,7 +1287,7 @@ def check_and_execute_trading_cycle():
                 f"• إجمالي العقود: `{total_lots:.2f} lots`\n"
                 f"• الأرباح العائمة: `{total_profit:+.2f} {currency}`\n\n"
                 f"🎯 *أحداث الدورة الحالية (Current Signals):*\n"
-                f"{signals_str}\n\n"
+                f"{signals_str}\n{ai_err_str}\n"
                 f"⚙️ تم فحص {len(symbols_to_trade)} أزواج بنجاح."
             )
             send_telegram_message(token, chat_id, report_msg)
