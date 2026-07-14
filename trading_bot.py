@@ -1321,8 +1321,14 @@ def check_and_execute_trading_cycle():
             triggered_signals = []
             for sym, report in last_scan_reports.items():
                 status = report.get("status", "")
+                details = report.get("details", "")
                 if "Executed" in status or "AI Approved" in status or "Technical" in status or "Approved" in status:
-                    triggered_signals.append(f"• `{sym}`: {status} ({report.get('details', '')[:100]})")
+                    # Clean up details to be a short reasoning message
+                    clean_reason = details.replace("HOLD - AI rejected proposed trade", "").replace("HOLD - ", "").strip()
+                    if len(clean_reason) > 60:
+                        clean_reason = clean_reason[:57] + "..."
+                    reason_suffix = f" ({clean_reason})" if clean_reason else ""
+                    triggered_signals.append(f"• `{sym}`: {status}{reason_suffix}")
                 elif "Blocked" in status:
                     triggered_signals.append(f"• `{sym}`: 🚫 {status}")
                 elif status == "News Frozen":
