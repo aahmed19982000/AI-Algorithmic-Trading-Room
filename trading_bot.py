@@ -970,6 +970,12 @@ def check_and_execute_trading_cycle():
                     active_positions=active_positions,
                     proposed_action=proposed_action
                 )
+                # Accumulate token usage
+                if "usage" in ai_result:
+                    cycle_in_tokens += ai_result["usage"].get("in_tokens", 0)
+                    cycle_out_tokens += ai_result["usage"].get("out_tokens", 0)
+                    cycle_cost += ai_result["usage"].get("cost", 0.0)
+
                 decision = ai_result.get("decision", "HOLD")
                 if decision == "ERROR":
                     raise Exception(ai_result.get("analysis", "Gemini API call failed"))
