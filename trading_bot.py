@@ -1369,6 +1369,21 @@ def main():
         print("[FATAL] Could not connect to MT5 Terminal. Exiting.")
         sys.exit(1)
 
+    # Send startup message
+    try:
+        from telegram_notifier import get_telegram_config, send_telegram_message
+        enabled, token, chat_id = get_telegram_config()
+        if enabled and token and chat_id:
+            startup_msg = (
+                f"🚀 *تم تشغيل بوت التداول بنجاح (Bot Started)*\n\n"
+                f"• *السيرفر:* `ويندوز VPS`\n"
+                f"• *وضع التشغيل:* `مستمر (Continuous Loop)`\n"
+                f"• *دورة الفحص:* كل `{args.interval}` ثانية ({args.interval // 60} دقيقة)"
+            )
+            send_telegram_message(token, chat_id, startup_msg)
+    except Exception as tg_startup_ex:
+        print(f"[ERROR] Failed to send startup TG alert: {tg_startup_ex}")
+
     try:
         if args.loop:
             while True:
@@ -1388,8 +1403,24 @@ def main():
         
     except KeyboardInterrupt:
         print("\n[INFO] Bot stopped by user.")
+        # Send user shutdown message
+        try:
+            from telegram_notifier import get_telegram_config, send_telegram_message
+            enabled, token, chat_id = get_telegram_config()
+            if enabled and token and chat_id:
+                send_telegram_message(token, chat_id, "⏹️ *تم إيقاف بوت التداول يدوياً بواسطة المستخدم (Bot Stopped).*")
+        except Exception:
+            pass
     except Exception as e:
         print(f"[ERROR] Unexpected error in main loop: {e}")
+        # Send crash message
+        try:
+            from telegram_notifier import get_telegram_config, send_telegram_message
+            enabled, token, chat_id = get_telegram_config()
+            if enabled and token and chat_id:
+                send_telegram_message(token, chat_id, f"⚠️ *توقف بوت التداول بسبب خطأ فني مفاجئ (Bot Crashed):*\n`{str(e)}`")
+        except Exception:
+            pass
     finally:
         # Disconnect safely
         disconnect_mt5()
