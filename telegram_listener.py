@@ -492,7 +492,9 @@ def telegram_listener_loop():
                         "• `/trades` - لعرض آخر 5 صفقات منفذة وتفاصيل أرباحها.\n"
                         "• `/analyze <الرمز>` - لإجراء تحليل فني مباشر وفوري لأي زوج عملات أو رمز مالي.\n"
                         "• `/stop` - لإيقاف التداول التلقائي فوراً (تعطيل الصفقات الجديدة).\n"
-                        "• `/start_trade` - لتفعيل التداول التلقائي مجدداً.\n\n"
+                        "• `/start_trade` - لتفعيل التداول التلقائي مجدداً.\n"
+                        "• `/toggle_ai` - لتفعيل/تعطيل تقييم الصفقات بواسطة الذكاء الاصطناعي (Gemini).\n"
+                        "• `/toggle_gann` - لتفعيل/تعطيل إستراتيجية جان الفنية البرمجية.\n\n"
                         "• *أي رسالة نصية أخرى* - سيتم اعتبارها دردشة وسيجيبك المحلل الفني بالاعتماد على سياق تداولاتك الحالية والتاريخية وبشكل ذكي.\n"
                     )
                     send_telegram_message(token, configured_chat_id, help_msg)
@@ -524,6 +526,30 @@ def telegram_listener_loop():
                         send_telegram_message(token, configured_chat_id, "🚀 *تم تفعيل التداول التلقائي بنجاح!* سيبدأ البوت بالبحث عن صفقات جديدة وتنفيذها تلقائياً.")
                     except Exception as e:
                         send_telegram_message(token, configured_chat_id, f"❌ *فشل تفعيل التداول:* `{str(e)}`")
+
+                elif user_msg_lower.startswith("/toggle_ai"):
+                    try:
+                        from db_manager import get_settings, save_settings
+                        curr_settings = get_settings()
+                        curr_ai = int(curr_settings.get("ai_evaluation", 1))
+                        new_ai = "0" if curr_ai == 1 else "1"
+                        save_settings({"ai_evaluation": new_ai})
+                        status_str = "تعطيل 🛑" if new_ai == "0" else "تفعيل 🚀"
+                        send_telegram_message(token, configured_chat_id, f"⚙️ *تحديث الإعدادات:*\nتم *{status_str}* فحص وتقييم الصفقات بواسطة الذكاء الاصطناعي (Gemini).")
+                    except Exception as e:
+                        send_telegram_message(token, configured_chat_id, f"❌ *فشل تحديث الإعدادات:* `{str(e)}`")
+
+                elif user_msg_lower.startswith("/toggle_gann"):
+                    try:
+                        from db_manager import get_settings, save_settings
+                        curr_settings = get_settings()
+                        curr_gann = int(curr_settings.get("gann_enabled", 1))
+                        new_gann = "0" if curr_gann == 1 else "1"
+                        save_settings({"gann_enabled": new_gann})
+                        status_str = "تعطيل 🛑 (العودة للمتوسطات الفنية)" if new_gann == "0" else "تفعيل 🚀"
+                        send_telegram_message(token, configured_chat_id, f"⚙️ *تحديث الإعدادات:*\nتم *{status_str}* إستراتيجية زوايا جان وفيبوناتشي.")
+                    except Exception as e:
+                        send_telegram_message(token, configured_chat_id, f"❌ *فشل تحديث الإعدادات:* `{str(e)}`")
                     
                 else:
                     # Check if the user is asking to analyze a symbol in natural language
