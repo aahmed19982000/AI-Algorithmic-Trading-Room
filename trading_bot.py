@@ -702,7 +702,7 @@ def check_and_execute_trading_cycle():
         portfolio_risk_blocked = True
         portfolio_block_reason = f"Total portfolio floating drawdown ({floating_dd_pct:.2f}%) exceeds 5.0% limit."
         print(f"[PORTFOLIO RISK BLOCK] {portfolio_block_reason}")
-    elif margin_level < 300.0:
+    elif len(active_positions) > 0 and margin_level < 300.0:
         portfolio_risk_blocked = True
         portfolio_block_reason = f"Margin Level ({margin_level:.1f}%) is below 300.0% safety threshold."
         print(f"[PORTFOLIO RISK BLOCK] {portfolio_block_reason}")
