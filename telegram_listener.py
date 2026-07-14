@@ -188,6 +188,18 @@ def handle_status_command(token, chat_id):
                     f"  Profit: *${p.profit:+.2f} USD*\n\n"
                 )
 
+        # Fetch config settings to show AI and trade mode
+        ai_eval_status = "ENABLED"
+        auto_trade_status = "ENABLED"
+        try:
+            settings = get_settings()
+            ai_eval_enabled = int(settings.get("ai_evaluation", 1)) == 1
+            auto_trade_enabled = int(settings.get("auto_trade", 1)) == 1
+            ai_eval_status = "🟢 ACTIVE (Gemini)" if ai_eval_enabled else "🔴 DISABLED"
+            auto_trade_status = "🟢 ACTIVE" if auto_trade_enabled else "🔴 STOPPED (Hold)"
+        except Exception:
+            pass
+
         status_msg = (
             f"📊 *SYSTEM STATUS REPORT*\n\n"
             f"• *Account:* `{info['name']}` (`#{info['login']}`)\n"
@@ -197,7 +209,9 @@ def handle_status_command(token, chat_id):
             f"• *Free Margin:* `${info['margin_free']:,.2f} {info['currency']}`\n"
             f"• *Margin Level:* `{info['margin_level']:.1f}%`\n"
             f"• *Leverage:* `1:{info['leverage']}`\n"
-            f"• *Trade Mode:* `{info['trade_mode']}`\n\n"
+            f"• *Trade Mode:* `{info['trade_mode']}`\n"
+            f"• *Auto-Trading:* {auto_trade_status}\n"
+            f"• *AI Analysis:* {ai_eval_status}\n\n"
             f"💼 *ACTIVE OPEN POSITIONS:*\n"
             f"{pos_list_str}"
         )
