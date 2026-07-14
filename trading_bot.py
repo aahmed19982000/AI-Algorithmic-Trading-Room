@@ -637,6 +637,9 @@ def check_and_execute_trading_cycle():
     print("=" * 60)
     last_scan_reports.clear()
     ai_failure_count = 0
+    cycle_in_tokens = 0
+    cycle_out_tokens = 0
+    cycle_cost = 0.0
 
     # 1. Load Settings from SQLite Database
     settings = get_settings()
