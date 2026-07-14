@@ -988,7 +988,7 @@ def check_and_execute_trading_cycle():
                 
                 # Check if auto_trade was active, and send alert only once when disabling it
                 try:
-                    from db_manager import get_settings, save_settings
+                    from db_manager import save_settings
                     current_settings = get_settings()
                     auto_trade_was_active = int(current_settings.get("auto_trade", 1)) == 1
                     
