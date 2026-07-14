@@ -526,8 +526,9 @@ def manage_active_positions_grid():
 
         print(f"[PROTECTION INFO] Symbol {symbol} has {len(pos_list)} active trades. Current profit/drawdown pips from last trade: {-drawdown_pips:.1f} pips.")
 
-        # Check if we need to open the next leg (ONLY if Grid is explicitly enabled)
-        if grid_enabled and drawdown_pips >= grid_step:
+        # Check if we need to open the next leg (ONLY if Grid is explicitly enabled and not a Gann trade)
+        is_gann_trade = any("gann" in (pos.comment or "").lower() for pos in pos_list)
+        if grid_enabled and not is_gann_trade and drawdown_pips >= grid_step:
             if len(pos_list) < max_legs:
                 print(f"[GRID TRIGGER] Drawdown ({drawdown_pips:.1f} pips) >= Grid Step ({grid_step} pips). Opening next leg!")
                 
