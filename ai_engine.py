@@ -169,8 +169,18 @@ class AITradingEngine:
             JSON Schema:
             {{
                 "decision": "APPROVE" or "REJECT",
-                "reason": "brief technical explanation why"
+                "reason": "brief technical explanation why",
+                "trade_params": {{
+                    "action": "{proposed_action}",
+                    "symbol": "{symbol}",
+                    "volume": 0.01,
+                    "sl": {gann_context.get('sl_price', 0.0) if gann_context else 0.0},
+                    "tp": {gann_context.get('target_price', 0.0) if gann_context else 0.0},
+                    "reason": "brief reason for trade parameters"
+                }}
             }}
+            
+            Note: If your decision is REJECT, you can set "trade_params" to null, but "decision" and "reason" must be present.
             """
             
             payload = {
@@ -197,15 +207,18 @@ class AITradingEngine:
                 
                 trade_params = None
                 if decision_final in ["BUY", "SELL"]:
-                    sl_val = float(gann_context.get("sl_price", 0.0)) if gann_context else 0.0
-                    tp_val = float(gann_context.get("target_price", 0.0)) if gann_context else 0.0
+                    tp_data = data.get("trade_params") or {}
+                    sl_val = float(tp_data.get("sl", gann_context.get("sl_price", 0.0) if gann_context else 0.0))
+                    tp_val = float(tp_data.get("tp", gann_context.get("target_price", 0.0) if gann_context else 0.0))
+                    vol_val = float(tp_data.get("volume", 0.01))
+                    
                     trade_params = {
                         "action": proposed_action,
                         "symbol": symbol,
-                        "volume": 0.01,
+                        "volume": vol_val,
                         "sl": sl_val,
                         "tp": tp_val,
-                        "reason": f"Ollama {self.ollama_model} Approved: {reason_val}"
+                        "reason": f"Ollama {self.ollama_model} Approved: {tp_data.get('reason', reason_val)}"
                     }
                 
                 print(f"[AI] Local Ollama Decision: {decision_final} (Reason: {reason_val})")
