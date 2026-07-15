@@ -195,7 +195,8 @@ def handle_status_command(token, chat_id):
             settings = get_settings()
             ai_eval_enabled = int(settings.get("ai_evaluation", 1)) == 1
             auto_trade_enabled = int(settings.get("auto_trade", 1)) == 1
-            ai_eval_status = "🟢 ACTIVE (Gemini)" if ai_eval_enabled else "🔴 DISABLED"
+            ai_provider_name = "Ollama" if settings.get("ai_provider", "gemini").lower() == "ollama" else "Gemini"
+            ai_eval_status = f"🟢 ACTIVE ({ai_provider_name})" if ai_eval_enabled else "🔴 DISABLED"
             auto_trade_status = "🟢 ACTIVE" if auto_trade_enabled else "🔴 STOPPED (Hold)"
         except Exception:
             pass
