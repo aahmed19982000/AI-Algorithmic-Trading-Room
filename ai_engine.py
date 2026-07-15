@@ -111,21 +111,30 @@ class AITradingEngine:
         try:
             settings = get_settings()
             prompt = settings.get("strategy_prompt", SYSTEM_PROMPT)
+            self.ai_provider = settings.get("ai_provider", "gemini").lower()
+            self.ollama_model = settings.get("ollama_model", "phi3").lower()
         except Exception as e:
-            print(f"[WARNING] Could not load strategy prompt from database: {e}. Using fallback prompt.")
+            print(f"[WARNING] Could not load strategy prompt or provider from database: {e}. Using fallback prompt and Gemini.")
             prompt = SYSTEM_PROMPT
+            self.ai_provider = "gemini"
+            self.ollama_model = "phi3"
 
-        self.model = genai.GenerativeModel(
-            model_name=model_name,
-            system_instruction=prompt,
-            tools=[TRADING_TOOLS]
-        )
+        self.system_prompt_text = prompt
         self.model_name = model_name
-        print(f"[OK] AI Engine initialized (model: {model_name})")
+
+        if self.ai_provider == "gemini":
+            self.model = genai.GenerativeModel(
+                model_name=model_name,
+                system_instruction=prompt,
+                tools=[TRADING_TOOLS]
+            )
+            print(f"[OK] AI Engine initialized (model: {model_name})")
+        else:
+            print(f"[OK] AI Engine initialized for Local Ollama (model: {self.ollama_model})")
 
     def analyze_market(self, symbol, timeframe, candles_data, account_info, current_price, gann_context=None, active_positions=None, proposed_action=None):
         """
-        Send market data to Gemini and get a trading decision.
+        Send market data to AI Provider (Gemini or Ollama) and get a trading decision.
 
         Args:
             symbol:        Trading symbol (e.g. "EURUSDm")
@@ -149,19 +158,84 @@ class AITradingEngine:
         prompt = self._build_prompt(symbol, timeframe, candles_data, account_info, current_price, gann_context, active_positions, proposed_action)
 
         print(f"\n[AI] Analyzing {symbol} {timeframe} (Proposed Action: {proposed_action})...")
-        print(f"[AI] Sending to {self.model_name}...")
-
-        try:
-            response = self.model.generate_content(prompt)
-            return self._parse_response(response)
-        except Exception as e:
-            print(f"[ERROR] AI API call failed: {e}")
-            return {
-                "decision": "ERROR",
-                "trade_params": None,
-                "analysis": str(e),
-                "raw_response": None
+        
+        if self.ai_provider == "ollama":
+            print(f"[AI] Sending to Local Ollama ({self.ollama_model})...")
+            import requests
+            
+            prompt_with_instructions = f"""{prompt}
+            
+            IMPORTANT: You must respond ONLY with a valid JSON object matching the schema below. Do not write any explanations, Markdown blocks, or prefix text. Just pure JSON.
+            JSON Schema:
+            {{
+                "decision": "APPROVE" or "REJECT",
+                "reason": "brief technical explanation why"
+            }}
+            """
+            
+            payload = {
+                "model": self.ollama_model,
+                "messages": [
+                    {"role": "system", "content": self.system_prompt_text},
+                    {"role": "user", "content": prompt_with_instructions}
+                ],
+                "stream": False,
+                "format": "json"
             }
+            
+            try:
+                r = requests.post("http://localhost:11434/api/chat", json=payload, timeout=45)
+                r.raise_for_status()
+                res_json = r.json()
+                content = res_json.get("message", {}).get("content", "")
+                data = json.loads(content)
+                
+                decision_val = data.get("decision", "REJECT").upper()
+                reason_val = data.get("reason", "Local AI decision")
+                
+                decision_final = proposed_action if decision_val == "APPROVE" else "HOLD"
+                
+                trade_params = None
+                if decision_final in ["BUY", "SELL"]:
+                    sl_val = float(gann_context.get("sl_price", 0.0)) if gann_context else 0.0
+                    tp_val = float(gann_context.get("target_price", 0.0)) if gann_context else 0.0
+                    trade_params = {
+                        "action": proposed_action,
+                        "symbol": symbol,
+                        "volume": 0.01,
+                        "sl": sl_val,
+                        "tp": tp_val,
+                        "reason": f"Ollama {self.ollama_model} Approved: {reason_val}"
+                    }
+                
+                print(f"[AI] Local Ollama Decision: {decision_final} (Reason: {reason_val})")
+                return {
+                    "decision": decision_final,
+                    "trade_params": trade_params,
+                    "analysis": reason_val,
+                    "raw_response": content
+                }
+            except Exception as e:
+                print(f"[ERROR] Local Ollama API call failed: {e}")
+                return {
+                    "decision": "ERROR",
+                    "trade_params": None,
+                    "analysis": f"Local Ollama failed: {str(e)}",
+                    "raw_response": None
+                }
+        else:
+            print(f"[AI] Sending to {self.model_name}...")
+            try:
+                response = self.model.generate_content(prompt)
+                return self._parse_response(response)
+            except Exception as e:
+                print(f"[ERROR] AI API call failed: {e}")
+                return {
+                    "decision": "ERROR",
+                    "trade_params": None,
+                    "analysis": str(e),
+                    "raw_response": None
+                }
 
     def _build_prompt(self, symbol, timeframe, candles_data, account_info, current_price, gann_context=None, active_positions=None, proposed_action=None):
         """Build the market analysis prompt without account data to save tokens."""
