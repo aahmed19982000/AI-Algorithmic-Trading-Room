@@ -102,19 +102,25 @@ def build_trades_context():
         return "Error loading recent trades."
 
 def query_gemini_analyst(user_msg, chat_id):
-    """Sends the message to Gemini with conversation history and recent trades context."""
+    """Sends the message to the configured AI provider (Gemini or Ollama) with conversation history and recent trades context."""
     try:
-        # Load API Key
-        GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-        if not GEMINI_API_KEY:
-            return "❌ *Error:* `GEMINI_API_KEY` is not set in the server environment variables."
+        from db_manager import get_settings
+        settings = get_settings()
+        ai_provider = settings.get("ai_provider", "gemini").lower()
+        ollama_model = settings.get("ollama_model", "phi3").lower()
+
+        # Load API Key if using Gemini
+        if ai_provider == "gemini":
+            GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+            if not GEMINI_API_KEY:
+                return "❌ *Error:* `GEMINI_API_KEY` is not set in the server environment variables."
 
         # Get recent trades context
         trades_context = build_trades_context()
 
         # Build System Instructions
         system_instruction = (
-            "You are a professional AI Trading Analyst Coach. The user is trading Forex and other assets using an MT5 bot powered by a Gann geometry strategy combined with a Gemini analysis filter.\n"
+            "You are a professional AI Trading Analyst Coach. The user is trading Forex and other assets using an MT5 bot powered by a Gann geometry strategy combined with a local AI analysis filter.\n"
             "Below is the history of the 20 most recent trades executed by the bot. Use this history to answer all user queries, analyze specific trades, and explain why trades were opened/closed:\n\n"
             f"{trades_context}\n\n"
             "Your instructions:\n"
@@ -125,41 +131,76 @@ def query_gemini_analyst(user_msg, chat_id):
             "5. ALWAYS respond in the user's language (if they ask in Arabic, respond in Arabic; if English, respond in English). Keep your answers concise, clear, and professional. Use Telegram markdown formatting where appropriate."
         )
 
-        # Initialize Gemini API
-        genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel(
-            model_name="gemini-2.5-flash",
-            system_instruction=system_instruction
-        )
+        if ai_provider == "ollama":
+            import requests
+            
+            # Prepare chat history for Ollama format
+            history = chat_histories.get(chat_id, [])
+            messages = [{"role": "system", "content": system_instruction}]
+            for h in history:
+                role_name = "assistant" if h.get("role") in ["assistant", "model"] else "user"
+                messages.append({"role": role_name, "content": h.get("text", "")})
+            messages.append({"role": "user", "content": user_msg})
+            
+            payload = {
+                "model": ollama_model,
+                "messages": messages,
+                "stream": False
+            }
+            
+            r = requests.post("http://localhost:11434/api/chat", json=payload, timeout=60)
+            r.raise_for_status()
+            res_json = r.json()
+            response_text = res_json.get("message", {}).get("content", "Error: Empty response from local AI.")
+            
+            # Save exchange to memory
+            if chat_id not in chat_histories:
+                chat_histories[chat_id] = []
+            chat_histories[chat_id].append({"role": "user", "text": user_msg})
+            chat_histories[chat_id].append({"role": "assistant", "text": response_text})
+            
+            # Keep history bounded to last 10 exchanges (20 messages)
+            if len(chat_histories[chat_id]) > 20:
+                chat_histories[chat_id] = chat_histories[chat_id][-20:]
+                
+            return response_text
 
-        # Prepare chat history for Gemini API format
-        history = chat_histories.get(chat_id, [])
-        gemini_history = []
-        for h in history:
-            role = h.get("role", "user")
-            text = h.get("text", "")
-            gemini_history.append({
-                "role": "user" if role == "user" else "model",
-                "parts": [text]
-            })
+        else:
+            # Initialize Gemini API
+            genai.configure(api_key=GEMINI_API_KEY)
+            model = genai.GenerativeModel(
+                model_name="gemini-2.5-flash",
+                system_instruction=system_instruction
+            )
 
-        # Start Chat and send message
-        chat = model.start_chat(history=gemini_history)
-        response = chat.send_message(user_msg)
+            # Prepare chat history for Gemini API format
+            history = chat_histories.get(chat_id, [])
+            gemini_history = []
+            for h in history:
+                role = h.get("role", "user")
+                text = h.get("text", "")
+                gemini_history.append({
+                    "role": "user" if role == "user" else "model",
+                    "parts": [text]
+                })
 
-        # Save exchange to memory
-        if chat_id not in chat_histories:
-            chat_histories[chat_id] = []
-        chat_histories[chat_id].append({"role": "user", "text": user_msg})
-        chat_histories[chat_id].append({"role": "model", "text": response.text})
+            # Start Chat and send message
+            chat = model.start_chat(history=gemini_history)
+            response = chat.send_message(user_msg)
 
-        # Keep history bounded to last 10 exchanges (20 messages)
-        if len(chat_histories[chat_id]) > 20:
-            chat_histories[chat_id] = chat_histories[chat_id][-20:]
+            # Save exchange to memory
+            if chat_id not in chat_histories:
+                chat_histories[chat_id] = []
+            chat_histories[chat_id].append({"role": "user", "text": user_msg})
+            chat_histories[chat_id].append({"role": "model", "text": response.text})
 
-        return response.text
+            # Keep history bounded to last 10 exchanges (20 messages)
+            if len(chat_histories[chat_id]) > 20:
+                chat_histories[chat_id] = chat_histories[chat_id][-20:]
+
+            return response.text
     except Exception as e:
-        print(f"[TG LISTENER] Error in Gemini chat API: {e}")
+        print(f"[TG LISTENER] Error in chat API: {e}")
         traceback.print_exc()
         return "❌ *حدث خطأ أثناء الاتصال بالمحلل الفني:* \n`" + str(e) + "`"
 
