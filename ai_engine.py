@@ -196,7 +196,7 @@ class AITradingEngine:
             }
             
             try:
-                r = requests.post(f"{self.ollama_url}/api/chat", json=payload, timeout=45)
+                r = requests.post(f"{self.ollama_url}/api/chat", json=payload, timeout=180)
                 r.raise_for_status()
                 res_json = r.json()
                 content = res_json.get("message", {}).get("content", "")
