@@ -150,11 +150,11 @@ def query_gemini_analyst(user_msg, chat_id):
             
             # Prepare chat history for Ollama format
             history = chat_histories.get(chat_id, [])
-            messages = [{"role": "system", "content": system_instruction}]
+            messages = [{"role": "system", "content": str(system_instruction or "")}]
             for h in history:
                 role_name = "assistant" if h.get("role") in ["assistant", "model"] else "user"
-                messages.append({"role": role_name, "content": h.get("text", "")})
-            messages.append({"role": "user", "content": user_msg})
+                messages.append({"role": role_name, "content": str(h.get("text") or "")})
+            messages.append({"role": "user", "content": str(user_msg or "")})
             
             payload = {
                 "model": ollama_model,
@@ -163,6 +163,8 @@ def query_gemini_analyst(user_msg, chat_id):
             }
             
             r = requests.post(f"{ollama_url}/api/chat", json=payload, timeout=180)
+            if r.status_code != 200:
+                print(f"[TG LISTENER] Ollama API error body: {r.text}")
             r.raise_for_status()
             res_json = r.json()
             response_text = res_json.get("message", {}).get("content", "Error: Empty response from local AI.")
