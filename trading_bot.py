@@ -1508,7 +1508,8 @@ def check_and_execute_trading_cycle():
             free_margin = account_info.get("margin_free", 0.0)
             currency = account_info.get("currency", "USD")
             
-            ai_err_str = f"\n⚠️ *خطأ اتصال الذكاء الاصطناعي (Gemini):* فشل الاتصال لـ `{ai_failure_count}` أزواج (تم تفعيل البديل الفني)." if ai_failure_count > 0 else ""
+            ai_provider_name = "Ollama" if settings.get("ai_provider", "gemini").lower() == "ollama" else "Gemini"
+            ai_err_str = f"\n⚠️ *خطأ اتصال الذكاء الاصطناعي ({ai_provider_name}):* فشل الاتصال لـ `{ai_failure_count}` أزواج (تم تفعيل البديل الفني)." if ai_failure_count > 0 else ""
 
             # Token usage details
             usage_str = ""
