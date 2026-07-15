@@ -106,8 +106,8 @@ def query_gemini_analyst(user_msg, chat_id):
     try:
         from db_manager import get_settings
         settings = get_settings()
-        ai_provider = settings.get("ai_provider", "gemini").lower()
-        ollama_model = settings.get("ollama_model", "phi3").lower()
+        ai_provider = os.getenv("AI_PROVIDER", settings.get("ai_provider", "gemini")).lower()
+        ollama_model = os.getenv("OLLAMA_MODEL", settings.get("ollama_model", "phi3")).lower()
 
         # Load API Key if using Gemini
         if ai_provider == "gemini":

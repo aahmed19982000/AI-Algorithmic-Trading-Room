@@ -111,15 +111,15 @@ class AITradingEngine:
         try:
             settings = get_settings()
             prompt = settings.get("strategy_prompt", SYSTEM_PROMPT)
-            self.ai_provider = settings.get("ai_provider", "gemini").lower()
-            self.ollama_model = settings.get("ollama_model", "phi3").lower()
-            self.ollama_url = settings.get("ollama_url", "http://localhost:11434").strip("/")
+            self.ai_provider = os.getenv("AI_PROVIDER", settings.get("ai_provider", "gemini")).lower()
+            self.ollama_model = os.getenv("OLLAMA_MODEL", settings.get("ollama_model", "phi3")).lower()
+            self.ollama_url = os.getenv("OLLAMA_URL", settings.get("ollama_url", "http://localhost:11434")).strip("/")
         except Exception as e:
             print(f"[WARNING] Could not load strategy prompt or provider from database: {e}. Using fallback prompt and Gemini.")
             prompt = SYSTEM_PROMPT
-            self.ai_provider = "gemini"
-            self.ollama_model = "phi3"
-            self.ollama_url = "http://localhost:11434"
+            self.ai_provider = os.getenv("AI_PROVIDER", "gemini").lower()
+            self.ollama_model = os.getenv("OLLAMA_MODEL", "phi3").lower()
+            self.ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11434").strip("/")
 
         self.system_prompt_text = prompt
         self.model_name = model_name
