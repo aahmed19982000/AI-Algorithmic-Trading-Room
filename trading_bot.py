@@ -1165,11 +1165,13 @@ def check_and_execute_trading_cycle():
                     if auto_trade_was_active:
                         save_settings({"auto_trade": "0"})
                         
+                        ai_provider_name = "Ollama" if current_settings.get("ai_provider", "gemini").lower() == "ollama" else "Gemini"
+                        
                         from telegram_notifier import get_telegram_config, send_telegram_message
                         enabled, token, chat_id = get_telegram_config()
                         if enabled and token and chat_id:
                             err_alert = (
-                                f"🚨 *فشل الاتصال بـ Gemini (Gemini Connection Failed)*\n\n"
+                                f"🚨 *فشل الاتصال بـ {ai_provider_name} ({ai_provider_name} Connection Failed)*\n\n"
                                 f"• *الزوج:* `{symbol}`\n"
                                 f"• *نوع الخطأ:* `{str(e)[:150]}`\n\n"
                                 f"🛑 *قرار الحماية:* تم إيقاف التداول التلقائي تلقائياً لحماية حسابك من التداول الفني العشوائي.\n"
