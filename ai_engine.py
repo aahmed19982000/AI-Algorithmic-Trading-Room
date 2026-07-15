@@ -192,7 +192,10 @@ class AITradingEngine:
                     {"role": "user", "content": prompt_with_instructions}
                 ],
                 "stream": False,
-                "format": "json"
+                "format": "json",
+                "options": {
+                    "num_ctx": 1024
+                }
             }
             
             try:
@@ -386,6 +389,15 @@ def format_candles_for_ai(df, last_n=20):
     Returns:
         str: Formatted candle data
     """
+    try:
+        from db_manager import get_settings
+        import os
+        ai_prov = os.getenv("AI_PROVIDER", get_settings().get("ai_provider", "gemini")).lower()
+        if ai_prov == "ollama":
+            last_n = min(last_n, 8)
+    except Exception:
+        pass
+
     recent = df.tail(last_n)
     lines = ["Time | Open | High | Low | Close | Volume"]
     lines.append("-" * 60)

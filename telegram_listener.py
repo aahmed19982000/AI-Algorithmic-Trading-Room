@@ -159,7 +159,10 @@ def query_gemini_analyst(user_msg, chat_id):
             payload = {
                 "model": ollama_model,
                 "messages": messages,
-                "stream": False
+                "stream": False,
+                "options": {
+                    "num_ctx": 1024
+                }
             }
             
             r = requests.post(f"{ollama_url}/api/chat", json=payload, timeout=180)
