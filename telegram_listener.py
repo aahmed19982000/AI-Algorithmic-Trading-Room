@@ -619,7 +619,14 @@ def telegram_listener_loop():
                         mappings = {
                             "gold": "XAUUSDm", "الذهب": "XAUUSDm",
                             "btc": "BTCUSDm", "bitcoin": "BTCUSDm", "بيتكوين": "BTCUSDm", "البيتكوين": "BTCUSDm",
-                            "eth": "ETHUSDm", "ethereum": "ETHUSDm", "إيثيريوم": "ETHUSDm"
+                            "eth": "ETHUSDm", "ethereum": "ETHUSDm", "إيثيريوم": "ETHUSDm",
+                            "يورو دولار": "EURUSDm", "اليورو دولار": "EURUSDm", "eurusd": "EURUSDm",
+                            "باوند دولار": "GBPUSDm", "الباوند دولار": "GBPUSDm", "الاسترليني": "GBPUSDm", "gbpusd": "GBPUSDm",
+                            "دولار ين": "USDJPYm", "الدولار ين": "USDJPYm", "usdjpy": "USDJPYm",
+                            "دولار كندي": "USDCADm", "الدولار كندي": "USDCADm", "usdcad": "USDCADm",
+                            "دولار فرنك": "USDCHFm", "الدولار فرنك": "USDCHFm", "usdchf": "USDCHFm",
+                            "استرالي دولار": "AUDUSDm", "الاسترالي دولار": "AUDUSDm", "audusd": "AUDUSDm",
+                            "نيوزيلندي دولار": "NZDUSDm", "النيوزيلندي دولار": "NZDUSDm", "nzdusd": "NZDUSDm"
                         }
                         extracted_symbol = None
                         for kw, sym_val in mappings.items():
