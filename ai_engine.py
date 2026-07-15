@@ -197,6 +197,9 @@ class AITradingEngine:
             
             try:
                 r = requests.post(f"{self.ollama_url}/api/chat", json=payload, timeout=180)
+                if r.status_code != 200:
+                    import sys
+                    sys.stderr.write(f"[AI ENGINE] Ollama API error body: {r.text}\n")
                 r.raise_for_status()
                 res_json = r.json()
                 content = res_json.get("message", {}).get("content", "")
