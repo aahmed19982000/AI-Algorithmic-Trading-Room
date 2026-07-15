@@ -621,16 +621,25 @@ def telegram_listener_loop():
                     if is_analysis_req:
                         # 1. Try common mappings
                         mappings = {
-                            "gold": "XAUUSDm", "الذهب": "XAUUSDm",
+                            "gold": "XAUUSDm", "الذهب": "XAUUSDm", "ذهب": "XAUUSDm",
+                            "silver": "XAGUSDm", "الفضة": "XAGUSDm", "فضة": "XAGUSDm",
+                            "oil": "USOILm", "النفط": "USOILm", "نفط": "USOILm", "برنت": "UKOILm",
                             "btc": "BTCUSDm", "bitcoin": "BTCUSDm", "بيتكوين": "BTCUSDm", "البيتكوين": "BTCUSDm",
-                            "eth": "ETHUSDm", "ethereum": "ETHUSDm", "إيثيريوم": "ETHUSDm",
+                            "eth": "ETHUSDm", "ethereum": "ETHUSDm", "إيثيريوم": "ETHUSDm", "الاثيريوم": "ETHUSDm", "اثيريوم": "ETHUSDm",
+                            "sol": "SOLUSDm", "solana": "SOLUSDm", "سولانا": "SOLUSDm",
+                            "xrp": "XRPUSDm", "ripple": "XRPUSDm", "ريبيل": "XRPUSDm", "الريبيل": "XRPUSDm",
+                            "doge": "DOGEUSDm", "dogecoin": "DOGEUSDm", "دوج": "DOGEUSDm", "دوج كوين": "DOGEUSDm",
+                            "bnb": "BNBUSDm", "بي ان بي": "BNBUSDm",
                             "يورو دولار": "EURUSDm", "اليورو دولار": "EURUSDm", "eurusd": "EURUSDm",
                             "باوند دولار": "GBPUSDm", "الباوند دولار": "GBPUSDm", "الاسترليني": "GBPUSDm", "gbpusd": "GBPUSDm",
                             "دولار ين": "USDJPYm", "الدولار ين": "USDJPYm", "usdjpy": "USDJPYm",
                             "دولار كندي": "USDCADm", "الدولار كندي": "USDCADm", "usdcad": "USDCADm",
                             "دولار فرنك": "USDCHFm", "الدولار فرنك": "USDCHFm", "usdchf": "USDCHFm",
                             "استرالي دولار": "AUDUSDm", "الاسترالي دولار": "AUDUSDm", "audusd": "AUDUSDm",
-                            "نيوزيلندي دولار": "NZDUSDm", "النيوزيلندي دولار": "NZDUSDm", "nzdusd": "NZDUSDm"
+                            "نيوزيلندي دولار": "NZDUSDm", "النيوزيلندي دولار": "NZDUSDm", "nzdusd": "NZDUSDm",
+                            "يورو ين": "EURJPYm", "اليورو ين": "EURJPYm",
+                            "باوند ين": "GBPJPYm", "الباوند ين": "GBPJPYm", "الاسترليني ين": "GBPJPYm",
+                            "يورو باوند": "EURGBPm", "اليورو باوند": "EURGBPm", "يورو استرليني": "EURGBPm"
                         }
                         extracted_symbol = None
                         for kw, sym_val in mappings.items():
