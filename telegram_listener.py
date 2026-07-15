@@ -73,10 +73,10 @@ def send_chat_action(token, chat_id, action="typing"):
     except Exception as e:
         print(f"[TG LISTENER] Error sending chat action: {e}")
 
-def build_trades_context():
-    """Retrieve recent 20 trades from database and format as a context string for Gemini."""
+def build_trades_context(limit=20):
+    """Retrieve recent trades from database and format as a context string for Gemini."""
     try:
-        trades = get_trade_history(limit=20)
+        trades = get_trade_history(limit=limit)
         if not trades:
             return "No recent trades executed yet."
 
@@ -115,21 +115,34 @@ def query_gemini_analyst(user_msg, chat_id):
             if not GEMINI_API_KEY:
                 return "❌ *Error:* `GEMINI_API_KEY` is not set in the server environment variables."
 
-        # Get recent trades context
-        trades_context = build_trades_context()
+        if ai_provider == "ollama":
+            # For local Ollama running on CPU, we limit context size to prevent prompt pre-fill timeout
+            trades_context = build_trades_context(limit=3)
+            
+            # Shorter, more concise instructions for Ollama to optimize token count
+            system_instruction = (
+                "You are a professional AI Trading Analyst Coach. The user is trading Forex using an MT5 bot.\n"
+                f"Here are the last 3 trades executed:\n{trades_context}\n"
+                "Instructions:\n"
+                "1. Answer user questions about trades concisely using Telegram markdown.\n"
+                "2. ALWAYS respond in the user's language (if Arabic, respond in Arabic)."
+            )
+        else:
+            # Get recent trades context (last 20 for Gemini)
+            trades_context = build_trades_context(limit=20)
 
-        # Build System Instructions
-        system_instruction = (
-            "You are a professional AI Trading Analyst Coach. The user is trading Forex and other assets using an MT5 bot powered by a Gann geometry strategy combined with a local AI analysis filter.\n"
-            "Below is the history of the 20 most recent trades executed by the bot. Use this history to answer all user queries, analyze specific trades, and explain why trades were opened/closed:\n\n"
-            f"{trades_context}\n\n"
-            "Your instructions:\n"
-            "1. Answer the user's questions about these trades, active positions, and market operations.\n"
-            "2. Explain why trades were opened (referencing their reasons, Gann pivots A/B/C, Fibonacci retracement %, and angles) and why they were closed (e.g. hitting TP, SL, or Martingale grid averaging).\n"
-            "3. If a user asks about a specific trade, locate it in the list above using its ticket number, symbol, or open time.\n"
-            "4. Provide constructive feedback, stats (e.g. win rate, total profit/loss), and trade breakdown.\n"
-            "5. ALWAYS respond in the user's language (if they ask in Arabic, respond in Arabic; if English, respond in English). Keep your answers concise, clear, and professional. Use Telegram markdown formatting where appropriate."
-        )
+            # Build System Instructions
+            system_instruction = (
+                "You are a professional AI Trading Analyst Coach. The user is trading Forex and other assets using an MT5 bot powered by a Gann geometry strategy combined with a local AI analysis filter.\n"
+                "Below is the history of the 20 most recent trades executed by the bot. Use this history to answer all user queries, analyze specific trades, and explain why trades were opened/closed:\n\n"
+                f"{trades_context}\n\n"
+                "Your instructions:\n"
+                "1. Answer the user's questions about these trades, active positions, and market operations.\n"
+                "2. Explain why trades were opened (referencing their reasons, Gann pivots A/B/C, Fibonacci retracement %, and angles) and why they were closed (e.g. hitting TP, SL, or Martingale grid averaging).\n"
+                "3. If a user asks about a specific trade, locate it in the list above using its ticket number, symbol, or open time.\n"
+                "4. Provide constructive feedback, stats (e.g. win rate, total profit/loss), and trade breakdown.\n"
+                "5. ALWAYS respond in the user's language (if they ask in Arabic, respond in Arabic; if English, respond in English). Keep your answers concise, clear, and professional. Use Telegram markdown formatting where appropriate."
+            )
 
         if ai_provider == "ollama":
             import requests
