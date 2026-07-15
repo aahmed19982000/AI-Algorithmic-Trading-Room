@@ -164,7 +164,8 @@ def query_gemini_analyst(user_msg, chat_id):
             
             r = requests.post(f"{ollama_url}/api/chat", json=payload, timeout=180)
             if r.status_code != 200:
-                print(f"[TG LISTENER] Ollama API error body: {r.text}")
+                import sys
+                sys.stderr.write(f"[TG LISTENER] Ollama API error body: {r.text}\n")
             r.raise_for_status()
             res_json = r.json()
             response_text = res_json.get("message", {}).get("content", "Error: Empty response from local AI.")
