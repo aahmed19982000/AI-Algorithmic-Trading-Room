@@ -133,6 +133,7 @@ def query_gemini_analyst(user_msg, chat_id):
 
         if ai_provider == "ollama":
             import requests
+            ollama_url = settings.get("ollama_url", "http://localhost:11434").strip("/")
             
             # Prepare chat history for Ollama format
             history = chat_histories.get(chat_id, [])
@@ -148,7 +149,7 @@ def query_gemini_analyst(user_msg, chat_id):
                 "stream": False
             }
             
-            r = requests.post("http://localhost:11434/api/chat", json=payload, timeout=60)
+            r = requests.post(f"{ollama_url}/api/chat", json=payload, timeout=60)
             r.raise_for_status()
             res_json = r.json()
             response_text = res_json.get("message", {}).get("content", "Error: Empty response from local AI.")

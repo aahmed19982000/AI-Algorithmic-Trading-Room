@@ -113,11 +113,13 @@ class AITradingEngine:
             prompt = settings.get("strategy_prompt", SYSTEM_PROMPT)
             self.ai_provider = settings.get("ai_provider", "gemini").lower()
             self.ollama_model = settings.get("ollama_model", "phi3").lower()
+            self.ollama_url = settings.get("ollama_url", "http://localhost:11434").strip("/")
         except Exception as e:
             print(f"[WARNING] Could not load strategy prompt or provider from database: {e}. Using fallback prompt and Gemini.")
             prompt = SYSTEM_PROMPT
             self.ai_provider = "gemini"
             self.ollama_model = "phi3"
+            self.ollama_url = "http://localhost:11434"
 
         self.system_prompt_text = prompt
         self.model_name = model_name
@@ -194,7 +196,7 @@ class AITradingEngine:
             }
             
             try:
-                r = requests.post("http://localhost:11434/api/chat", json=payload, timeout=45)
+                r = requests.post(f"{self.ollama_url}/api/chat", json=payload, timeout=45)
                 r.raise_for_status()
                 res_json = r.json()
                 content = res_json.get("message", {}).get("content", "")
