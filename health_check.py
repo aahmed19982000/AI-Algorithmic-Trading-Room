@@ -40,6 +40,20 @@ def settings_check():
             f"grid_enabled={s.get('grid_enabled')}, ai_cost_cap_daily={s.get('ai_cost_cap_daily')}")
 
 
+def gemini_check():
+    import os
+    from dotenv import load_dotenv
+    load_dotenv()
+    import google.generativeai as genai
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise Exception("GEMINI_API_KEY not set in .env")
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel("gemini-2.5-flash")
+    response = model.generate_content("Reply with exactly one word: OK")
+    return f"API reachable, response={response.text.strip()!r}"
+
+
 def ollama_check():
     import requests
     import os
@@ -83,6 +97,7 @@ def main():
     results = [
         check("MT5 Connection", mt5_check),
         check("Database Settings", settings_check),
+        check("Gemini Connectivity", gemini_check),
         check("Ollama Connectivity", ollama_check),
         check("Telegram", telegram_check),
         check("Market Status Detection", market_status_check),
