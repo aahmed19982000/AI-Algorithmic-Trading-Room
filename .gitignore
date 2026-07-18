@@ -5,6 +5,12 @@
 .env.*
 
 # ===========================
+# Local data / generated artifacts
+# ===========================
+database.db
+static/screenshots/
+
+# ===========================
 # Virtual Environment
 # ===========================
 venv/

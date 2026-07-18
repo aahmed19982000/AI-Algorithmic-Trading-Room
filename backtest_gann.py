@@ -50,6 +50,38 @@ def fetch_backtest_data(symbol, timeframe_str, years=1):
     }, inplace=True)
     return df
 
+def get_currency_conversion_rate(symbol_info):
+    """
+    Multiplier to convert 1 unit of the symbol's profit currency into the account's
+    deposit currency, using a live snapshot rate. Live trading gets this for free from
+    MT5's own trade_tick_value; this manual backtest simulator must compute it explicitly
+    or every non-USD-quoted pair (JPY pairs, cross pairs) reports profit/drawdown figures
+    off by the exchange rate between the quote currency and the account currency.
+    """
+    try:
+        account_currency = mt5.account_info().currency
+    except Exception:
+        account_currency = "USD"
+
+    profit_currency = symbol_info.currency_profit
+    if profit_currency == account_currency:
+        return 1.0
+
+    suffix = symbol_info.name[6:]  # broker symbol suffix, e.g. "m" in "EURUSDm"
+
+    # Direct quote: PROFIT_CCY/ACCOUNT_CCY (e.g. GBPUSD -> GBP profit, USD account)
+    direct_tick = mt5.symbol_info_tick(f"{profit_currency}{account_currency}{suffix}")
+    if direct_tick and direct_tick.bid > 0:
+        return direct_tick.bid
+
+    # Inverse quote: ACCOUNT_CCY/PROFIT_CCY (e.g. USDJPY -> JPY profit, USD account)
+    inverse_tick = mt5.symbol_info_tick(f"{account_currency}{profit_currency}{suffix}")
+    if inverse_tick and inverse_tick.bid > 0:
+        return 1.0 / inverse_tick.bid
+
+    print(f"[WARNING] No conversion rate found for {profit_currency}->{account_currency}. Assuming 1.0 (results may be inaccurate).")
+    return 1.0
+
 def get_gann_multiplier(price):
     if price < 10.0:
         return 10000.0
@@ -203,11 +235,19 @@ def run_backtest_gann(df, symbol, geometry='square', lookback=100, use_grid=True
     sim_balance = 500.0
     
     # Scale pip sizes for cryptos / CFDs
-    if contract_size < 1000.0: 
+    if contract_size < 1000.0:
         avg_price = df['Close'].mean()
         pip_size = (0.01 * avg_price) / 10.0
         pip_multiplier = 1.0 / pip_size
         print(f"[INFO] Crypto/CFD Asset detected. Adjusted pip_size to {pip_size:.4f} (10 pips = {10.0*pip_size:.2f} USD)")
+
+    # Convert profit-currency amounts into the account's deposit currency (USD here).
+    # Without this, any symbol not quoted directly in USD (JPY pairs, cross pairs) reports
+    # profit/drawdown figures off by the quote-currency exchange rate.
+    currency_conversion_rate = get_currency_conversion_rate(symbol_info)
+    contract_size_usd = contract_size * currency_conversion_rate
+    if currency_conversion_rate != 1.0:
+        print(f"[INFO] {symbol}: profit currency is {symbol_info.currency_profit}, applying conversion rate {currency_conversion_rate:.5f} to account currency.")
 
     # 1. Identify local pivots
     window = 5
@@ -259,7 +299,7 @@ def run_backtest_gann(df, symbol, geometry='square', lookback=100, use_grid=True
                 avg_entry = sum(leg["entry"] * leg["vol"] for leg in basket) / total_vol
                 # Check Stop Loss
                 if low_curr <= basket_sl:
-                    profit_usd = sum((basket_sl - leg["entry"]) * leg["vol"] for leg in basket) * contract_size
+                    profit_usd = sum((basket_sl - leg["entry"]) * leg["vol"] for leg in basket) * contract_size_usd
                     total_pips = sum((basket_sl - leg["entry"]) * leg["vol"] for leg in basket) * pip_multiplier
                     total_vol = sum(leg["vol"] for leg in basket)
                     trades.append({
@@ -283,7 +323,7 @@ def run_backtest_gann(df, symbol, geometry='square', lookback=100, use_grid=True
                     
                 # Check Take Profit
                 elif high_curr >= basket_tp:
-                    profit_usd = sum((basket_tp - leg["entry"]) * leg["vol"] for leg in basket) * contract_size
+                    profit_usd = sum((basket_tp - leg["entry"]) * leg["vol"] for leg in basket) * contract_size_usd
                     total_pips = sum((basket_tp - leg["entry"]) * leg["vol"] for leg in basket) * pip_multiplier
                     total_vol = sum(leg["vol"] for leg in basket)
                     trades.append({
@@ -308,7 +348,7 @@ def run_backtest_gann(df, symbol, geometry='square', lookback=100, use_grid=True
                 # Check Take Profit (90% of TP distance as Close Early)
                 elif high_curr >= avg_entry + (basket_tp - avg_entry) * 0.90:
                     tp_early = avg_entry + (basket_tp - avg_entry) * 0.90
-                    profit_usd = sum((tp_early - leg["entry"]) * leg["vol"] for leg in basket) * contract_size
+                    profit_usd = sum((tp_early - leg["entry"]) * leg["vol"] for leg in basket) * contract_size_usd
                     total_pips = sum((tp_early - leg["entry"]) * leg["vol"] for leg in basket) * pip_multiplier
                     trades.append({
                         "type": "BUY",
@@ -331,7 +371,7 @@ def run_backtest_gann(df, symbol, geometry='square', lookback=100, use_grid=True
                     
                 # Check M5 swing exit
                 elif check_m5_exit_signal_backtest(current_time, m5_df, 0):
-                    profit_usd = sum((close_curr - leg["entry"]) * leg["vol"] for leg in basket) * contract_size
+                    profit_usd = sum((close_curr - leg["entry"]) * leg["vol"] for leg in basket) * contract_size_usd
                     total_pips = sum((close_curr - leg["entry"]) * leg["vol"] for leg in basket) * pip_multiplier
                     trades.append({
                         "type": "BUY",
@@ -380,7 +420,7 @@ def run_backtest_gann(df, symbol, geometry='square', lookback=100, use_grid=True
                 avg_entry = sum(leg["entry"] * leg["vol"] for leg in basket) / total_vol
                 # Check Stop Loss
                 if high_curr >= basket_sl:
-                    profit_usd = sum((leg["entry"] - basket_sl) * leg["vol"] for leg in basket) * contract_size
+                    profit_usd = sum((leg["entry"] - basket_sl) * leg["vol"] for leg in basket) * contract_size_usd
                     total_pips = sum((leg["entry"] - basket_sl) * leg["vol"] for leg in basket) * pip_multiplier
                     total_vol = sum(leg["vol"] for leg in basket)
                     trades.append({
@@ -404,7 +444,7 @@ def run_backtest_gann(df, symbol, geometry='square', lookback=100, use_grid=True
                     
                 # Check Take Profit
                 elif low_curr <= basket_tp:
-                    profit_usd = sum((leg["entry"] - basket_tp) * leg["vol"] for leg in basket) * contract_size
+                    profit_usd = sum((leg["entry"] - basket_tp) * leg["vol"] for leg in basket) * contract_size_usd
                     total_pips = sum((leg["entry"] - basket_tp) * leg["vol"] for leg in basket) * pip_multiplier
                     total_vol = sum(leg["vol"] for leg in basket)
                     trades.append({
@@ -429,7 +469,7 @@ def run_backtest_gann(df, symbol, geometry='square', lookback=100, use_grid=True
                 # Check Take Profit (90% of TP distance as Close Early)
                 elif low_curr <= avg_entry - (avg_entry - basket_tp) * 0.90:
                     tp_early = avg_entry - (avg_entry - basket_tp) * 0.90
-                    profit_usd = sum((leg["entry"] - tp_early) * leg["vol"] for leg in basket) * contract_size
+                    profit_usd = sum((leg["entry"] - tp_early) * leg["vol"] for leg in basket) * contract_size_usd
                     total_pips = sum((leg["entry"] - tp_early) * leg["vol"] for leg in basket) * pip_multiplier
                     trades.append({
                         "type": "SELL",
@@ -452,7 +492,7 @@ def run_backtest_gann(df, symbol, geometry='square', lookback=100, use_grid=True
                     
                 # Check M5 swing exit
                 elif check_m5_exit_signal_backtest(current_time, m5_df, 1):
-                    profit_usd = sum((leg["entry"] - close_curr) * leg["vol"] for leg in basket) * contract_size
+                    profit_usd = sum((leg["entry"] - close_curr) * leg["vol"] for leg in basket) * contract_size_usd
                     total_pips = sum((leg["entry"] - close_curr) * leg["vol"] for leg in basket) * pip_multiplier
                     trades.append({
                         "type": "SELL",
@@ -581,7 +621,7 @@ def run_backtest_gann(df, symbol, geometry='square', lookback=100, use_grid=True
                         sl_price_diff = abs(close_curr - basket_sl)
                         
                         if sl_price_diff > 0:
-                            vol = risk_amount / (sl_price_diff * contract_size)
+                            vol = risk_amount / (sl_price_diff * contract_size_usd)
                             vol_step = symbol_info.volume_step if (symbol_info and symbol_info.volume_step > 0) else 0.01
                             vol = round(vol / vol_step) * vol_step
                             vol_min = symbol_info.volume_min if symbol_info else 0.01
@@ -618,7 +658,7 @@ def run_backtest_gann(df, symbol, geometry='square', lookback=100, use_grid=True
                         sl_price_diff = abs(basket_sl - close_curr)
                         
                         if sl_price_diff > 0:
-                            vol = risk_amount / (sl_price_diff * contract_size)
+                            vol = risk_amount / (sl_price_diff * contract_size_usd)
                             vol_step = symbol_info.volume_step if (symbol_info and symbol_info.volume_step > 0) else 0.01
                             vol = round(vol / vol_step) * vol_step
                             vol_min = symbol_info.volume_min if symbol_info else 0.01

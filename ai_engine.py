@@ -12,7 +12,7 @@ import os
 import json
 from dotenv import load_dotenv
 import google.generativeai as genai
-from db_manager import get_settings
+from db_manager import get_settings, get_trade_history
 
 load_dotenv()
 
@@ -128,7 +128,14 @@ class AITradingEngine:
             self.model = genai.GenerativeModel(
                 model_name=model_name,
                 system_instruction=prompt,
-                tools=[TRADING_TOOLS]
+                tools=[TRADING_TOOLS],
+                # Gemini 2.5 Flash spends hidden "thinking" tokens out of this same
+                # budget (this SDK version has no thinking_config to cap those
+                # separately) — a tight cap here truncates the real answer before it's
+                # written (verified: 400 caused finish_reason=MAX_TOKENS with ~380
+                # thinking tokens and an empty/cut-off response). 2000 leaves headroom
+                # for thinking while still bounding worst-case cost to a fraction of a cent.
+                generation_config=genai.GenerationConfig(max_output_tokens=2000)
             )
             print(f"[OK] AI Engine initialized (model: {model_name})")
         else:
@@ -197,7 +204,7 @@ class AITradingEngine:
                     "num_ctx": 1024
                 }
             }
-            
+
             try:
                 r = requests.post(f"{self.ollama_url}/api/chat", json=payload, timeout=180)
                 if r.status_code != 200:
@@ -205,8 +212,19 @@ class AITradingEngine:
                     sys.stderr.write(f"[AI ENGINE] Ollama API error body: {r.text}\n")
                 r.raise_for_status()
                 res_json = r.json()
-                content = res_json.get("message", {}).get("content", "")
-                data = json.loads(content)
+                content = res_json.get("message", {}).get("content", "").strip()
+                
+                # Clean Markdown code blocks if present
+                clean_content = content
+                if clean_content.startswith("```"):
+                    lines = clean_content.splitlines()
+                    if lines and lines[0].startswith("```"):
+                        lines = lines[1:]
+                    if lines and lines[-1].startswith("```"):
+                        lines = lines[:-1]
+                    clean_content = "\n".join(lines).strip()
+                
+                data = json.loads(clean_content)
                 
                 decision_val = data.get("decision", "REJECT").upper()
                 reason_val = data.get("reason", "Local AI decision")
@@ -230,12 +248,27 @@ class AITradingEngine:
                     }
                 
                 print(f"[AI] Local Ollama Decision: {decision_final} (Reason: {reason_val})")
-                return {
+                
+                # Extract Token usage metadata from Ollama response if available
+                in_tokens = res_json.get("prompt_eval_count", 0)
+                out_tokens = res_json.get("eval_count", 0)
+                
+                result = {
                     "decision": decision_final,
                     "trade_params": trade_params,
                     "analysis": reason_val,
                     "raw_response": content
                 }
+                
+                if in_tokens > 0 or out_tokens > 0:
+                    result["usage"] = {
+                        "in_tokens": in_tokens,
+                        "out_tokens": out_tokens,
+                        "cost": 0.0
+                    }
+                    print(f"[AI USAGE - Ollama] Prompt: {in_tokens} | Candidates: {out_tokens} | Cost: $0.000000")
+                
+                return result
             except Exception as e:
                 print(f"[ERROR] Local Ollama API call failed: {e}")
                 return {
@@ -258,8 +291,59 @@ class AITradingEngine:
                     "raw_response": None
                 }
 
+    def _get_symbol_performance_summary(self, symbol, days=30, max_trades=10):
+        """
+        Compute a real recent performance summary for this symbol from the SQLite trade log,
+        so the AI evaluates risk against actual numbers instead of guessing.
+        """
+        import datetime as _dt
+
+        try:
+            history = get_trade_history(limit=500)
+        except Exception:
+            return "No trade history available."
+
+        cutoff = _dt.datetime.now() - _dt.timedelta(days=days)
+        wins = losses = considered = 0
+        net_profit = 0.0
+        worst_trade = 0.0
+
+        for trade in history:
+            if trade.get("symbol") != symbol or trade.get("status") != "CLOSED":
+                continue
+            close_time_str = trade.get("close_time")
+            close_dt = None
+            if close_time_str:
+                try:
+                    close_dt = _dt.datetime.strptime(close_time_str, "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    close_dt = None
+            if close_dt and close_dt < cutoff:
+                continue
+
+            profit = float(trade.get("profit") or 0.0)
+            considered += 1
+            wins += 1 if profit >= 0 else 0
+            losses += 1 if profit < 0 else 0
+            net_profit += profit
+            worst_trade = min(worst_trade, profit)
+
+            if considered >= max_trades:
+                break
+
+        if considered == 0:
+            return f"No closed trades on {symbol} in the last {days} days (no real drawdown data to report)."
+
+        return (f"Last {considered} closed trade(s) on {symbol} in the past {days} days: "
+                f"{wins}W / {losses}L, Net P/L: ${net_profit:+.2f}, Worst single trade: ${worst_trade:+.2f}.")
+
     def _build_prompt(self, symbol, timeframe, candles_data, account_info, current_price, gann_context=None, active_positions=None, proposed_action=None):
-        """Build the market analysis prompt without account data to save tokens."""
+        """Build the market analysis prompt, grounded in real account/position/history data."""
+        account_info = account_info or {}
+        active_positions = active_positions or []
+        symbol_positions = [p for p in active_positions if getattr(p, "symbol", None) == symbol]
+        performance_summary = self._get_symbol_performance_summary(symbol)
+
         prompt = f"""
 ## MARKET DATA FOR ANALYSIS
 
@@ -270,6 +354,19 @@ class AITradingEngine:
 - Bid: {current_price.get('bid', 'N/A')}
 - Ask: {current_price.get('ask', 'N/A')}
 - Spread: {current_price.get('spread', 'N/A')} pips
+
+### Account Status (real data):
+- Balance: {account_info.get('balance', 'N/A')} {account_info.get('currency', '')}
+- Equity: {account_info.get('equity', 'N/A')}
+- Margin Level: {account_info.get('margin_level', 'N/A')}%
+- Open Positions (all symbols): {len(active_positions)} | On {symbol}: {len(symbol_positions)}
+
+### Real Recent Performance on {symbol}:
+{performance_summary}
+
+IMPORTANT: Only reference the real figures given above. Do not invent statistics, percentages,
+or trade counts that are not explicitly stated in this prompt. Keep any explanation or rejection
+reason to one short sentence (under 30 words).
 """
         if gann_context:
             prompt += f"""
@@ -376,6 +473,92 @@ If you decide to HOLD, explain why in text.
                     print(f"[AI] Reason: {part.text[:200]}")
 
         return result
+
+    def analyze_exit(self, symbol, pos_type, candles_data):
+        """
+        Ask the AI to verify whether the M5 trend has indeed reversed.
+        
+        Args:
+            symbol: Trading symbol (e.g. "EURUSDm")
+            pos_type: 0 for BUY, 1 for SELL
+            candles_data: Formatted string of recent M5 candles
+            
+        Returns:
+            bool: True if AI confirms we should EXIT, False if AI says HOLD (interprets trigger as noise).
+        """
+        pos_str = "BUY (Long)" if pos_type == 0 else "SELL (Short)"
+        signal_str = "Lower Low (LL) breakout" if pos_type == 0 else "Higher High (HH) breakout"
+        
+        prompt = f"""
+You are a professional Forex trading analyst.
+We have an active {pos_str} position on {symbol}.
+Our technical indicators on the M5 timeframe have triggered a potential exit alert: **{signal_str}**.
+
+Your task is to analyze the recent M5 candlestick data below and decide if this is a genuine trend reversal requiring us to EXIT immediately to protect capital/profits, or if this is just minor market noise (e.g., a brief pullback) and we should HOLD (keep the position open).
+
+## RECENT M5 CANDLES (newest last):
+{candles_data}
+
+## YOUR DECISION RULES:
+- If the candles confirm a structural change and a clear shift in direction opposing our {pos_str} trade: Recommend EXIT.
+- If the candles show it is likely just a minor correction/noise and the primary momentum is still intact: Recommend HOLD.
+"""
+
+        # Exit verification always runs on the free local Ollama model, regardless of
+        # ai_provider. It's low-stakes (a failure/timeout here just defaults to HOLD,
+        # i.e. keep the position open) and fires far more often than the entry decision,
+        # so routing it to Gemini would be the single biggest avoidable cost driver.
+        print(f"[AI EXIT CHECK] Sending exit analysis to Local Ollama ({self.ollama_model})...")
+        import requests
+
+        prompt_with_instructions = f"""{prompt}
+
+        IMPORTANT: You must respond ONLY with a valid JSON object matching the schema below. Do not write any explanations, Markdown blocks, or prefix text. Just pure JSON.
+        JSON Schema:
+        {{
+            "decision": "EXIT" or "HOLD",
+            "reason": "brief technical explanation why"
+        }}
+        """
+
+        payload = {
+            "model": self.ollama_model,
+            "messages": [
+                {"role": "system", "content": "You are a professional trading analyst. Return only JSON."},
+                {"role": "user", "content": prompt_with_instructions}
+            ],
+            "stream": False,
+            "format": "json",
+            "options": {
+                "num_ctx": 1024
+            }
+        }
+
+        try:
+            r = requests.post(f"{self.ollama_url}/api/chat", json=payload, timeout=30)
+            r.raise_for_status()
+            res_json = r.json()
+            content = res_json.get("message", {}).get("content", "").strip()
+
+            # Clean Markdown code blocks if present
+            clean_content = content
+            if clean_content.startswith("```"):
+                lines = clean_content.splitlines()
+                if lines and lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].startswith("```"):
+                    lines = lines[:-1]
+                clean_content = "\n".join(lines).strip()
+
+            data = json.loads(clean_content)
+            decision_val = data.get("decision", "HOLD").upper()
+            reason_val = data.get("reason", "Local AI exit decision")
+
+            print(f"[AI EXIT CHECK] Ollama Decision: {decision_val} (Reason: {reason_val})")
+            return decision_val == "EXIT"
+        except Exception as e:
+            print(f"[ERROR] Ollama exit check failed: {e}. Defaulting to HOLD (keeping position).")
+            return False
 
 
 def format_candles_for_ai(df, last_n=20):

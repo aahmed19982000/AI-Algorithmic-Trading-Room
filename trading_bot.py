@@ -36,6 +36,9 @@ DEFAULT_TIMEFRAME = os.getenv("TRADING_TIMEFRAME", "H4")
 # Global dict to store the results of the last scanning cycle per symbol
 last_scan_reports = {}
 last_ai_scan_times = {}
+consecutive_ai_failures = {}  # per-symbol consecutive AI failure counts
+last_exit_check_candle = {}  # per-symbol M5 candle time of the last AI exit-check call
+last_exit_check_result = {}  # per-symbol cached AI exit-check result for that candle
 
 
 def get_db_connection():
@@ -466,6 +469,7 @@ def manage_active_positions_grid():
     and modifies the TP/SL of all active legs of that symbol.
     Also handles general trade protections (50% Breakeven, 90% Early Close) regardless of grid settings.
     """
+    global last_exit_check_candle, last_exit_check_result
     settings = get_settings()
     grid_enabled = int(settings.get("grid_enabled", 1)) == 1
 
@@ -609,14 +613,40 @@ def manage_active_positions_grid():
                 
             # 3. Check M5 Swing Exit
             if check_m5_exit_signal(symbol, 0 if basket_type == 'BUY' else 1):
-                exit_reason_ar = "تكوين قمة أعلى (للبيع) أو قاع أدنى (للشراء) على M5"
-                exit_reason_en = f"M5 {'Lower Low' if basket_type == 'BUY' else 'Higher High'} Exit"
-                print(f"[M5 EXIT] Closing basket for {symbol} due to M5 exit signal.")
-                for pos in pos_list:
-                    close_res = close_position(ticket=pos.ticket, comment=exit_reason_en[:28])
-                    if close_res:
-                        log_trade_close(pos.ticket, current_price, pos.profit, exit_reason=f"{exit_reason_en} ({exit_reason_ar})")
-                continue
+                # Call AI to verify the exit signal, but only once per M5 candle to avoid
+                # re-querying the AI on every 30s position-management tick for the same signal.
+                exit_cache_key = f"{symbol}_{basket_type}"
+                ai_exit_confirmed = False
+                try:
+                    m5_df = get_candles(symbol=symbol, timeframe=mt5.TIMEFRAME_M5, count=15)
+                    if m5_df is not None and len(m5_df) >= 5:
+                        current_m5_candle_time = str(m5_df['Time'].iloc[-1])
+                        if last_exit_check_candle.get(exit_cache_key) == current_m5_candle_time:
+                            ai_exit_confirmed = last_exit_check_result.get(exit_cache_key, False)
+                            print(f"[AI EXIT CHECK] Reusing cached decision for {symbol} on candle {current_m5_candle_time}: "
+                                  f"{'EXIT' if ai_exit_confirmed else 'HOLD'}")
+                        else:
+                            m5_candles_text = format_candles_for_ai(m5_df, last_n=15)
+                            engine = AITradingEngine(model_name="gemini-2.5-flash")
+                            ai_exit_confirmed = engine.analyze_exit(symbol, 0 if basket_type == 'BUY' else 1, m5_candles_text)
+                            last_exit_check_candle[exit_cache_key] = current_m5_candle_time
+                            last_exit_check_result[exit_cache_key] = ai_exit_confirmed
+                    else:
+                        print(f"[AI EXIT CHECK] Not enough M5 candles to verify. Skipping AI check.")
+                except Exception as ai_ex:
+                    print(f"[AI EXIT CHECK] [ERROR] Failed to run AI exit verification: {ai_ex}")
+                
+                if ai_exit_confirmed:
+                    exit_reason_ar = "تأكيد انعكاس الاتجاه على M5 بواسطة الذكاء الاصطناعي"
+                    exit_reason_en = f"AI Verified M5 Exit"
+                    print(f"[M5 EXIT] AI CONFIRMED exit for {symbol}. Closing basket.")
+                    for pos in pos_list:
+                        close_res = close_position(ticket=pos.ticket, comment=exit_reason_en[:28])
+                        if close_res:
+                            log_trade_close(pos.ticket, current_price, pos.profit, exit_reason=f"{exit_reason_en} ({exit_reason_ar})")
+                    continue
+                else:
+                    print(f"[M5 EXIT BLOCK] M5 exit trigger detected, but AI rejected it as noise. Keeping position open.")
                 
             # 4. Check 50% Breakeven (Move SL to weighted average entry price)
             if pct_reached >= 0.50:
@@ -637,7 +667,7 @@ def check_and_execute_trading_cycle():
     """
     Executes a single scanning cycle across all symbols stored in the SQLite settings database.
     """
-    global last_scan_reports
+    global last_scan_reports, consecutive_ai_failures
     print("\n" + "=" * 60)
     print(f"🔄 STARTING SCANNING CYCLE: {time.strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
@@ -1152,44 +1182,59 @@ def check_and_execute_trading_cycle():
                 
                 # Record scan timestamp in cache
                 last_ai_scan_times[symbol] = current_candle_time
+                # Reset this symbol's consecutive failure counter on success
+                consecutive_ai_failures[symbol] = 0
             except Exception as e:
                 print(f"[ERROR] AI analysis failed for {symbol}: {e}")
                 ai_failure_count += 1
-                
-                # Check if auto_trade was active, and send alert only once when disabling it
+                consecutive_ai_failures[symbol] = consecutive_ai_failures.get(symbol, 0) + 1
+                symbol_failures = consecutive_ai_failures[symbol]
+
+                # Check if auto_trade was active, and send alert only when disabling it (on 3rd consecutive failure for this symbol)
                 try:
                     from db_manager import save_settings
                     current_settings = get_settings()
                     auto_trade_was_active = int(current_settings.get("auto_trade", 1)) == 1
-                    
-                    if auto_trade_was_active:
+
+                    if auto_trade_was_active and symbol_failures >= 3:
                         save_settings({"auto_trade": "0"})
-                        
+
                         ai_provider_name = "Ollama" if current_settings.get("ai_provider", "gemini").lower() == "ollama" else "Gemini"
-                        
+
                         from telegram_notifier import get_telegram_config, send_telegram_message
                         enabled, token, chat_id = get_telegram_config()
                         if enabled and token and chat_id:
                             err_alert = (
                                 f"🚨 *فشل الاتصال بـ {ai_provider_name} ({ai_provider_name} Connection Failed)*\n\n"
                                 f"• *الزوج:* `{symbol}`\n"
+                                f"• *عدد الإخفاقات المتتالية:* `{symbol_failures}/3`\n"
                                 f"• *نوع الخطأ:* `{str(e)[:150]}`\n\n"
                                 f"🛑 *قرار الحماية:* تم إيقاف التداول التلقائي تلقائياً لحماية حسابك من التداول الفني العشوائي.\n"
                                 f"💬 لتفعيل التداول الفني البديل يدوياً أرسل `/start_trade`."
                             )
                             send_telegram_message(token, chat_id, err_alert)
+                    elif auto_trade_was_active:
+                        ai_provider_name = "Ollama" if current_settings.get("ai_provider", "gemini").lower() == "ollama" else "Gemini"
+                        print(f"[WARNING] AI Engine ({ai_provider_name}) failed for {symbol}. Consecutive failures: {symbol_failures}/3. Continuing with HOLD for this cycle.")
                 except Exception as db_err:
                     print(f"[ERROR] Failed to save disabled trade state or send alert: {db_err}")
 
                 last_scan_reports[symbol] = {
                     "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
-                    "status": "Error (Halted)",
-                    "details": f"Gemini AI API call failed: {str(e)}. Trading halted.",
+                    "status": "Error (Skip)",
+                    "details": f"AI API call failed ({symbol_failures}/3): {str(e)}. Skip current cycle.",
                     "structure": gann_context
                 }
-                # Force max_positions_reached to True to skip other pairs in this cycle
-                max_positions_reached = True
-                continue
+
+                # If this symbol hasn't reached the failure threshold, default to HOLD and let other pairs scan
+                if symbol_failures < 3:
+                    decision = "HOLD"
+                    trade_params = None
+                    reasoning = f"AI call failed ({symbol_failures}/3): {str(e)}. Defaulting to HOLD."
+                else:
+                    # Force max_positions_reached to True to skip other pairs in this cycle
+                    max_positions_reached = True
+                    continue
         else:
             print("[INFO] AI Risk Evaluation disabled. Executing purely based on technical strategy.")
             decision = proposed_action
@@ -1215,9 +1260,14 @@ def check_and_execute_trading_cycle():
             reasoning = f"Executed pure technical signal: {proposed_action}. Details: {technical_reason}"
 
         # Initialize default report status
+        if decision in ["BUY", "SELL"]:
+            status_str = f"AI Approved ({decision})" if ai_evaluation_enabled else f"Technical ({decision})"
+        else:
+            status_str = f"AI Rejected (HOLD)" if ai_evaluation_enabled else f"Technical (HOLD)"
+
         last_scan_reports[symbol] = {
             "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
-            "status": f"AI Approved ({decision})" if ai_evaluation_enabled else f"Technical ({decision})",
+            "status": status_str,
             "details": reasoning,
             "structure": gann_context
         }
@@ -1473,6 +1523,47 @@ def check_and_execute_trading_cycle():
         print(f"{sym:<12} | {active_str:<13} | {lots_str:<10} | {floating_str:<12} | {win_loss_str:<18} | {closed_profit_str:<16}")
     print("=" * 90)
 
+    # 2.5 Daily AI cost cap: accumulate paid-API spend and auto-disable AI evaluation
+    # if it crosses the configured daily ceiling (Ollama calls cost $0.00, so this
+    # only ever engages when ai_provider is a paid API such as Gemini).
+    if cycle_cost > 0:
+        try:
+            from db_manager import save_settings
+            today_str = time.strftime('%Y-%m-%d')
+            cost_date = settings.get("ai_cost_today_date", today_str)
+            accumulated_cost = float(settings.get("ai_cost_today", 0.0))
+            if cost_date != today_str:
+                accumulated_cost = 0.0
+                cost_date = today_str
+            accumulated_cost += cycle_cost
+
+            save_settings({
+                "ai_cost_today": str(accumulated_cost),
+                "ai_cost_today_date": cost_date
+            })
+            print(f"[AI COST] Accumulated AI API cost today ({cost_date}): ${accumulated_cost:.4f}")
+
+            daily_cap = float(settings.get("ai_cost_cap_daily", 1.0))
+            if accumulated_cost >= daily_cap and int(settings.get("ai_evaluation", 1)) == 1:
+                save_settings({"ai_evaluation": "0"})
+                print(f"[COST CAP] Daily AI cost cap (${daily_cap:.2f}) reached. AI evaluation disabled for the rest of the day; falling back to pure technical strategy.")
+                try:
+                    from telegram_notifier import get_telegram_config, send_telegram_message
+                    cap_enabled, cap_token, cap_chat_id = get_telegram_config()
+                    if cap_enabled and cap_token and cap_chat_id:
+                        cap_alert = (
+                            f"\U0001F4B0 *تم بلوغ سقف تكلفة الذكاء الاصطناعي اليومي*\n\n"
+                            f"• التكلفة المتراكمة اليوم: `${accumulated_cost:.4f}`\n"
+                            f"• السقف المحدد: `${daily_cap:.2f}`\n\n"
+                            f"\U0001F6D1 تم تعطيل طبقة تقييم الذكاء الاصطناعي تلقائياً لبقية اليوم، والتنفيذ سيعتمد على الاستراتيجية الفنية البحتة.\n"
+                            f"\U0001F4AC لإعادة التفعيل يدوياً أرسل `/toggle_ai`."
+                        )
+                        send_telegram_message(cap_token, cap_chat_id, cap_alert)
+                except Exception as cap_alert_ex:
+                    print(f"[ERROR] Failed to send AI cost cap alert: {cap_alert_ex}")
+        except Exception as cost_cap_ex:
+            print(f"[ERROR] Failed to track/enforce daily AI cost cap: {cost_cap_ex}")
+
     # 3. Send Telegram Cycle Report
     try:
         from telegram_notifier import get_telegram_config, send_telegram_message
@@ -1488,7 +1579,7 @@ def check_and_execute_trading_cycle():
             for sym, report in last_scan_reports.items():
                 status = report.get("status", "")
                 details = report.get("details", "")
-                if "Executed" in status or "AI Approved" in status or "Technical" in status or "Approved" in status:
+                if "Executed" in status or "AI Approved" in status or "AI Rejected" in status or "Technical" in status or "Approved" in status:
                     # Clean up details to be a short reasoning message
                     clean_reason = details.replace("HOLD - AI rejected proposed trade", "").replace("HOLD - ", "").strip()
                     if len(clean_reason) > 60:
@@ -1547,6 +1638,26 @@ def check_and_execute_trading_cycle():
     print("=" * 60)
 
 
+def is_market_closed(reference_symbol="EURUSDm", stale_minutes=15):
+    """
+    Detect real forex market closure (weekend) by checking how fresh the broker's
+    last tick is for a reference symbol. During active trading, ticks update within
+    seconds; a tick older than `stale_minutes` means prices aren't moving (closed).
+
+    Uses a fixed major FX pair rather than the configured symbol list — several
+    configured symbols are crypto (trades 24/7), which would never read as closed.
+    """
+    try:
+        tick = mt5.symbol_info_tick(reference_symbol)
+        if tick is None or tick.time == 0:
+            return True
+        age_seconds = time.time() - tick.time
+        return age_seconds > (stale_minutes * 60)
+    except Exception as e:
+        print(f"[WARNING] Could not determine market status: {e}")
+        return False
+
+
 def main():
     parser = argparse.ArgumentParser(description="AI Algorithmic Trading Bot Daemon")
     parser.add_argument("--loop", action="store_true", help="Run in a continuous loop")
@@ -1582,18 +1693,46 @@ def main():
 
     try:
         if args.loop:
+            last_full_scan_time = 0.0
+            market_was_closed = False
+            print(f"[LOOP] Starting loop. Positions checked every 30s. Full scan every {args.interval}s.")
+
             while True:
                 # Ensure connection is active
                 if mt5.terminal_info() is None or mt5.account_info() is None:
                     print("[WARNING] Connection lost. Attempting to reconnect...")
                     if not connect_mt5():
                         print("[ERROR] Reconnection failed. Retrying next cycle.")
-                        time.sleep(min(30, args.interval))
+                        time.sleep(30)
                         continue
-                
-                check_and_execute_trading_cycle()
-                print(f"\n[LOOP] Sleeping for {args.interval} seconds...")
-                time.sleep(args.interval)
+
+                # 1. Frequently manage active positions and sync positions (every 30 seconds)
+                try:
+                    sync_db_with_mt5_positions()
+                    manage_active_positions_grid()
+                except Exception as grid_ex:
+                    print(f"[ERROR] Frequent grid management failed: {grid_ex}")
+
+                # 2. Skip the heavier scanning cycle while the real market is closed
+                # (weekend) — the loop itself, position management, and reconnection
+                # checks above keep running as usual.
+                if is_market_closed():
+                    if not market_was_closed:
+                        print("[MARKET] Market appears closed (stale quotes detected). Pausing scanning cycles until it reopens.")
+                        market_was_closed = True
+                else:
+                    if market_was_closed:
+                        print("[MARKET] Market appears open again (fresh quotes detected). Resuming scanning.")
+                        market_was_closed = False
+                        last_full_scan_time = 0.0  # force an immediate scan on reopen
+
+                    # 3. Run full scanning cycle only if args.interval seconds have elapsed
+                    current_time = time.time()
+                    if current_time - last_full_scan_time >= args.interval:
+                        check_and_execute_trading_cycle()
+                        last_full_scan_time = current_time
+
+                time.sleep(30)
         else:
             check_and_execute_trading_cycle()
         
