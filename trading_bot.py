@@ -1720,11 +1720,31 @@ def main():
                     if not market_was_closed:
                         print("[MARKET] Market appears closed (stale quotes detected). Pausing scanning cycles until it reopens.")
                         market_was_closed = True
+                        try:
+                            from telegram_notifier import get_telegram_config, send_telegram_message
+                            mkt_enabled, mkt_token, mkt_chat_id = get_telegram_config()
+                            if mkt_enabled and mkt_token and mkt_chat_id:
+                                send_telegram_message(
+                                    mkt_token, mkt_chat_id,
+                                    "\U0001F634 *السوق مغلق حالياً*\n\nتم إيقاف دورات الفحص مؤقتاً (لا توجد أسعار جديدة). سيتم استئناف الفحص تلقائياً فور فتح السوق."
+                                )
+                        except Exception as mkt_tg_ex:
+                            print(f"[ERROR] Failed to send market-closed Telegram alert: {mkt_tg_ex}")
                 else:
                     if market_was_closed:
                         print("[MARKET] Market appears open again (fresh quotes detected). Resuming scanning.")
                         market_was_closed = False
                         last_full_scan_time = 0.0  # force an immediate scan on reopen
+                        try:
+                            from telegram_notifier import get_telegram_config, send_telegram_message
+                            mkt_enabled, mkt_token, mkt_chat_id = get_telegram_config()
+                            if mkt_enabled and mkt_token and mkt_chat_id:
+                                send_telegram_message(
+                                    mkt_token, mkt_chat_id,
+                                    "\U0001F514 *تم فتح السوق من جديد*\n\nاستُؤنف الفحص التلقائي للفرص."
+                                )
+                        except Exception as mkt_tg_ex:
+                            print(f"[ERROR] Failed to send market-reopened Telegram alert: {mkt_tg_ex}")
 
                     # 3. Run full scanning cycle only if args.interval seconds have elapsed
                     current_time = time.time()
