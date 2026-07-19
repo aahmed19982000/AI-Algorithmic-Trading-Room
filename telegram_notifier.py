@@ -1,6 +1,41 @@
 import os
 import requests
-from db_manager import get_settings
+from db_manager import get_settings, classify_trade_strategy
+
+CURRENCY_FLAGS = {
+    "EUR": "🇪🇺", "USD": "🇺🇸", "GBP": "🇬🇧", "JPY": "🇯🇵",
+    "AUD": "🇦🇺", "CAD": "🇨🇦", "CHF": "🇨🇭", "NZD": "🇳🇿",
+}
+
+# Metals/commodities/crypto have no country — use a representative emoji instead.
+SPECIAL_ASSET_EMOJI = {
+    "XAU": "🥇", "XAG": "🥈", "UKOIL": "🛢️", "USOIL": "🛢️",
+    "BTC": "🟠", "ETH": "🔷", "LTC": "⚪", "XRP": "🔵",
+    "SOL": "🟣", "DOGE": "🐶", "BNB": "🟡",
+}
+
+
+def get_symbol_flags(symbol):
+    """Best-effort pair of flags/emoji representing a symbol's base and quote assets."""
+    clean = symbol[:-1] if symbol.lower().endswith("m") else symbol
+    clean = clean.upper()
+
+    for code in sorted(SPECIAL_ASSET_EMOJI, key=len, reverse=True):
+        if clean.startswith(code):
+            base_emoji = SPECIAL_ASSET_EMOJI[code]
+            quote = clean[len(code):]
+            quote_emoji = CURRENCY_FLAGS.get(quote, "")
+            return f"{base_emoji}{quote_emoji}"
+
+    if len(clean) == 6:
+        base, quote = clean[:3], clean[3:]
+        base_emoji = CURRENCY_FLAGS.get(base, "")
+        quote_emoji = CURRENCY_FLAGS.get(quote, "")
+        if base_emoji or quote_emoji:
+            return f"{base_emoji}{quote_emoji}"
+
+    return ""
+
 
 def get_telegram_config():
     """Load Telegram config settings from SQLite db."""
@@ -97,10 +132,15 @@ def notify_trade_open(ticket, symbol, action, volume, entry_price, sl, tp, reaso
             f"• *Pullback (التصحيح):* `{gann_context.get('retracement_pct', 0):.1f}%`"
         )
 
+    strategy_name = classify_trade_strategy(reason)
+    flags = get_symbol_flags(symbol)
+    symbol_display = f"{symbol} {flags}" if flags else symbol
+
     caption = (
         f"🔔 *TRADE OPENED* {emoji}\n\n"
+        f"• *Strategy (الاستراتيجية):* `{strategy_name}`\n"
         f"• *Ticket:* `#{ticket}`\n"
-        f"• *Symbol:* `{symbol}`\n"
+        f"• *Symbol:* `{symbol_display}`\n"
         f"• *Action:* `{action.upper()}`\n"
         f"• *Volume:* `{volume:.2f} Lots`\n"
         f"• *Entry Price:* `{entry_price:.5f}`\n"
@@ -142,11 +182,14 @@ def notify_trade_close(ticket, symbol, action, volume, entry_price, close_price,
     exit_reason_str = ""
     if exit_reason:
         exit_reason_str = f"• *Exit Reason (سبب الإغلاق):* `{exit_reason}`\n"
-    
+
+    flags = get_symbol_flags(symbol)
+    symbol_display = f"{symbol} {flags}" if flags else symbol
+
     caption = (
         f"🏁 *TRADE CLOSED* ({emoji})\n\n"
         f"• *Ticket:* `#{ticket}`\n"
-        f"• *Symbol:* `{symbol}`\n"
+        f"• *Symbol:* `{symbol_display}`\n"
         f"• *Action:* `{action.upper()}`\n"
         f"• *Volume:* `{volume:.2f} Lots`\n"
         f"• *Entry Price:* `{entry_price:.5f}`\n"
@@ -172,7 +215,7 @@ def notify_trade_close(ticket, symbol, action, volume, entry_price, close_price,
             updated_orig_caption = (
                 f"📦 *[CLOSED - {result}] TRADE OPENED* {original_emoji}\n\n"
                 f"• *Ticket:* `#{ticket}`\n"
-                f"• *Symbol:* `{symbol}`\n"
+                f"• *Symbol:* `{symbol_display}`\n"
                 f"• *Action:* `{action.upper()}`\n"
                 f"• *Volume:* `{volume:.2f} Lots`\n"
                 f"• *Entry Price:* `{entry_price:.5f}`\n"

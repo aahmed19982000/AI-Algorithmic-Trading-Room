@@ -157,6 +157,28 @@ def init_db():
         "gann_enabled": "1",
         "gann_lookback": "100",
         "gann_geometry": "square",
+        "sma5_reversion_enabled": "1",
+        "sma5_reversion_symbols": json.dumps([
+            "GBPJPYm", "USOILm", "USDJPYm", "CHFJPYm", "GBPCADm", "SOLUSDm",
+            "EURJPYm", "BTCUSDm", "ETHUSDm", "USDCHFm", "CADJPYm", "XRPUSDm"
+        ]),
+        "sma5_reversion_threshold_pct": "0.3",
+        "sma5_reversion_sl_multiplier": "1.5",
+        "sma5_reversion_min_rr_ratio": "0.5",
+        "sma5_reversion_rsi_overbought": "65.0",
+        "sma5_reversion_rsi_oversold": "35.0",
+        "sma5_reversion_min_tp_spread_multiple": "2.0",
+        "elliott_wave_enabled": "1",
+        "elliott_wave_symbols": json.dumps([
+            "XAUUSDm", "USDJPYm", "GBPNZDm", "EURJPYm", "NZDCHFm",
+            "CHFJPYm", "XAGUSDm", "ETHUSDm", "EURUSDm", "EURNZDm", "EURGBPm"
+        ]),
+        "elliott_wave_lookback": "100",
+        "elliott_wave_min_retracement": "0.382",
+        "elliott_wave_max_retracement": "0.786",
+        "elliott_wave_max_wave1_internal_retracement": "0.618",
+        "elliott_wave_extension_ratio": "1.618",
+        "elliott_wave_min_rr_ratio": "1.0",
         "telegram_enabled": "0",
         "telegram_token": "",
         "telegram_chat_id": "",
@@ -299,8 +321,59 @@ def get_trade_history(limit=50):
     cursor.execute("SELECT * FROM trades ORDER BY open_time DESC LIMIT ?", (limit,))
     rows = cursor.fetchall()
     conn.close()
-    
+
     return [dict(row) for row in rows]
+
+
+def classify_trade_strategy(reason):
+    """
+    Identifies which strategy opened a trade from its `reason` text — every
+    strategy already prefixes its own reason string ("Gann: ...",
+    "SMA5 Reversion: ...", "Pure Technical: ..."), so no separate DB column
+    is needed for attribution.
+    """
+    text = (reason or "").lower()
+    if "sma5 reversion" in text:
+        return "SMA5 Reversion"
+    if "elliott wave" in text:
+        return "Elliott Wave"
+    if "gann" in text:
+        return "Gann"
+    return "Technical Fallback"
+
+
+def get_strategy_performance_summary(limit=1000):
+    """
+    Aggregates closed-trade win/loss counts and net profit per strategy,
+    inferred from each trade's `reason` text via classify_trade_strategy().
+    """
+    history = get_trade_history(limit=limit)
+    summary = {}
+
+    for trade in history:
+        if trade.get("status") != "CLOSED":
+            continue
+        strategy = classify_trade_strategy(trade.get("reason"))
+        entry = summary.setdefault(strategy, {"wins": 0, "losses": 0, "profit": 0.0})
+        profit = float(trade.get("profit") or 0.0)
+        if profit >= 0:
+            entry["wins"] += 1
+        else:
+            entry["losses"] += 1
+        entry["profit"] += profit
+
+    return summary
+
+
+def get_trade_by_ticket(ticket):
+    """Fetch a single trade row by ticket (used to recover strategy-specific
+    context stored at entry, e.g. Elliott Wave's A/B/C prices in gann_data)."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM trades WHERE ticket = ?", (ticket,))
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 
 def get_active_trades():

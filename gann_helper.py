@@ -177,8 +177,174 @@ def detect_market_structure(df, lookback=100):
         return buy_setup
     elif sell_setup:
         return sell_setup
-        
+
     return None
+
+
+def calculate_fibonacci_extension(a, b, ratio=1.618):
+    """
+    Projects a Fibonacci extension target from a two-point move A->B.
+    Works for both directions via a single formula: for a bullish move
+    (B > A) this projects upward past B; for a bearish move (B < A) it
+    projects downward past B by the same proportion.
+    """
+    return b + ratio * (b - a)
+
+
+def _check_wave1_impulse_quality(window_highs, window_lows, idx_A, val_A, idx_B, val_B,
+                                  max_internal_retracement, is_buy):
+    """
+    Checks whether the A->B move "looks" impulsive rather than corrective by
+    scanning for any interim pullback between A and B and verifying it never
+    retraces more than `max_internal_retracement` of the move made so far.
+    A 3-wave corrective structure misread as an impulsive Wave 1 typically
+    shows a much deeper interim retracement than a genuine impulse would.
+    """
+    if is_buy:
+        interim_highs = sorted(p for p in window_highs if idx_A < p[0] < idx_B)
+        interim_lows = sorted(p for p in window_lows if idx_A < p[0] < idx_B)
+        for low_idx, low_val in interim_lows:
+            preceding_highs = [h for h in interim_highs if h[0] < low_idx]
+            ref_val = preceding_highs[-1][1] if preceding_highs else val_A
+            move_up = ref_val - val_A
+            if move_up <= 0:
+                continue
+            retracement = (ref_val - low_val) / move_up
+            if retracement > max_internal_retracement:
+                return False
+        return True
+    else:
+        interim_lows = sorted(p for p in window_lows if idx_A < p[0] < idx_B)
+        interim_highs = sorted(p for p in window_highs if idx_A < p[0] < idx_B)
+        for high_idx, high_val in interim_highs:
+            preceding_lows = [l for l in interim_lows if l[0] < high_idx]
+            ref_val = preceding_lows[-1][1] if preceding_lows else val_A
+            move_down = val_A - ref_val
+            if move_down <= 0:
+                continue
+            retracement = (high_val - ref_val) / move_down
+            if retracement > max_internal_retracement:
+                return False
+        return True
+
+
+def detect_elliott_wave2_setup(df, lookback=100, min_retracement=0.382, max_retracement=0.786,
+                                max_wave1_internal_retracement=0.618):
+    """
+    Detects a completed Elliott Wave 2 retracement following an impulsive Wave 1,
+    using the same swing-pivot scan as detect_market_structure() (A-B-C shape:
+    A=Wave 0 start, B=Wave 1 extreme, C=Wave 2 retracement).
+
+    Two things distinguish this from a plain Gann A-B-C structure:
+    - The retracement band matches Elliott's Wave 2 convention (38.2%-78.6% by
+      default) rather than Gann's 50-75%. A ratio >= 1.0 (Wave 2 fully
+      retracing Wave 1) is automatically excluded by this band.
+    - A Wave 1 "impulse quality" check (_check_wave1_impulse_quality) rejects
+      setups where the A->B move itself looks like a 3-wave correction rather
+      than a genuine impulse — a real, entry-time-checkable piece of Elliott
+      rigor beyond a bare 3-point retracement count.
+
+    Returns:
+        dict or None: {
+            "type": "BUY" | "SELL", "A": wave0_price, "B": wave1_price, "C": wave2_price,
+            "idx_B": index_of_B, "retracement_pct": ratio*100,
+            "time_A"/"time_B"/"time_C": timestamps (if available)
+        }
+    """
+    if df is None or len(df) < 20:
+        return None
+
+    window = 5
+    pivots_high = []
+    pivots_low = []
+
+    for i in range(window, len(df) - window):
+        is_high = True
+        for j in range(i - window, i + window + 1):
+            if df.loc[j, 'High'] > df.loc[i, 'High']:
+                is_high = False
+                break
+        if is_high:
+            pivots_high.append((i, df.loc[i, 'High']))
+
+        is_low = True
+        for j in range(i - window, i + window + 1):
+            if df.loc[j, 'Low'] < df.loc[i, 'Low']:
+                is_low = False
+                break
+        if is_low:
+            pivots_low.append((i, df.loc[i, 'Low']))
+
+    last_idx = len(df) - 1
+    lookback_start = max(0, last_idx - lookback)
+
+    window_highs = [p for p in pivots_high if lookback_start <= p[0] <= last_idx]
+    window_lows = [p for p in pivots_low if lookback_start <= p[0] <= last_idx]
+
+    def _make_context(idx_A, idx_B, idx_C):
+        return {
+            "time_A": df.loc[idx_A, 'time'].strftime('%Y-%m-%d %H:%M:%S') if 'time' in df.columns else str(df.index[idx_A]),
+            "time_B": df.loc[idx_B, 'time'].strftime('%Y-%m-%d %H:%M:%S') if 'time' in df.columns else str(df.index[idx_B]),
+            "time_C": df.loc[idx_C, 'time'].strftime('%Y-%m-%d %H:%M:%S') if 'time' in df.columns else str(df.index[idx_C]),
+        }
+
+    # Trace bullish Wave 0-1-2 (Low A -> High B -> Low C, expecting Wave 3 up)
+    buy_setup = None
+    if len(window_lows) >= 2 and len(window_highs) >= 1:
+        for c_pivot in reversed(window_lows):
+            idx_C, val_C = c_pivot
+            b_pivots = [p for p in window_highs if p[0] < idx_C]
+            if not b_pivots:
+                continue
+            idx_B, val_B = b_pivots[-1]
+            a_pivots = [p for p in window_lows if p[0] < idx_B]
+            if not a_pivots:
+                continue
+            idx_A, val_A = a_pivots[-1]
+
+            if val_C > val_A and val_B > val_C:
+                ratio = (val_B - val_C) / (val_B - val_A)
+                if min_retracement <= ratio <= max_retracement:
+                    if _check_wave1_impulse_quality(window_highs, window_lows, idx_A, val_A,
+                                                     idx_B, val_B, max_wave1_internal_retracement, is_buy=True):
+                        buy_setup = {
+                            "type": "BUY", "A": float(val_A), "B": float(val_B), "C": float(val_C),
+                            "idx_B": int(idx_B), "idx_C": int(idx_C),
+                            "retracement_pct": ratio * 100.0,
+                            **_make_context(idx_A, idx_B, idx_C)
+                        }
+                        break
+
+    # Trace bearish Wave 0-1-2 (High A -> Low B -> High C, expecting Wave 3 down)
+    sell_setup = None
+    if len(window_highs) >= 2 and len(window_lows) >= 1:
+        for c_pivot in reversed(window_highs):
+            idx_C, val_C = c_pivot
+            b_pivots = [p for p in window_lows if p[0] < idx_C]
+            if not b_pivots:
+                continue
+            idx_B, val_B = b_pivots[-1]
+            a_pivots = [p for p in window_highs if p[0] < idx_B]
+            if not a_pivots:
+                continue
+            idx_A, val_A = a_pivots[-1]
+
+            if val_C < val_A and val_B < val_C:
+                ratio = (val_C - val_B) / (val_A - val_B)
+                if min_retracement <= ratio <= max_retracement:
+                    if _check_wave1_impulse_quality(window_highs, window_lows, idx_A, val_A,
+                                                     idx_B, val_B, max_wave1_internal_retracement, is_buy=False):
+                        sell_setup = {
+                            "type": "SELL", "A": float(val_A), "B": float(val_B), "C": float(val_C),
+                            "idx_B": int(idx_B), "idx_C": int(idx_C),
+                            "retracement_pct": ratio * 100.0,
+                            **_make_context(idx_A, idx_B, idx_C)
+                        }
+                        break
+
+    if buy_setup and sell_setup:
+        return buy_setup if buy_setup["idx_B"] > sell_setup["idx_B"] else sell_setup
+    return buy_setup or sell_setup
 
 
 def detect_dynamic_gann_levels(base_price, trigger_price, mode='bullish'):

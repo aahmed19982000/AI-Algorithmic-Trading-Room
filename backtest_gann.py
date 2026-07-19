@@ -286,12 +286,15 @@ def run_backtest_gann(df, symbol, geometry='square', lookback=100, use_grid=True
     trades = []
     
     for i in range(200, len(df)):
+        if len(basket) == 0 and sim_balance <= 0:
+            break  # account blown — see backtest_sma5_reversion.py for why this guard exists
+
         current_time = df.loc[i, 'time']
         close_curr = df.loc[i, 'Close']
         open_curr = df.loc[i, 'Open']
         high_curr = df.loc[i, 'High']
         low_curr = df.loc[i, 'Low']
-        
+
         # --- Case A: Manage Active Trade Basket ---
         if len(basket) > 0:
             if basket_type == 'BUY':
@@ -537,9 +540,13 @@ def run_backtest_gann(df, symbol, geometry='square', lookback=100, use_grid=True
 
         # --- Case B: Scan for structural setup or entry ---
         if len(basket) == 0:
+            # A pivot at index p needs `window` bars AFTER it to be confirmed (see the
+            # is_high/is_low scan above), so it isn't actually knowable until bar p+window.
+            # Filtering by p[0] < i alone would let a "fresh" pivot near i be confirmed
+            # using bars that don't exist yet at bar i in a real-time replay — lookahead bias.
             lookback_start = max(0, i - lookback)
-            window_highs = [p for p in pivots_high if lookback_start <= p[0] < i]
-            window_lows = [p for p in pivots_low if lookback_start <= p[0] < i]
+            window_highs = [p for p in pivots_high if lookback_start <= p[0] and p[0] + window <= i]
+            window_lows = [p for p in pivots_low if lookback_start <= p[0] and p[0] + window <= i]
             
             buy_setup = None
             if len(window_lows) >= 2 and len(window_highs) >= 1:

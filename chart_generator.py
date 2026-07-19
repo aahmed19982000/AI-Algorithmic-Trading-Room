@@ -7,7 +7,7 @@ import pandas as pd
 import MetaTrader5 as mt5
 from datetime import datetime, timedelta
 
-def generate_chart_screenshot(symbol, ticket, entry_price, sl_price, tp_price, gann_data=None, timeframe_str="M30", entry_time_str=None, exit_time_str=None, exit_price=None, result=None, profit_usd=None):
+def generate_chart_screenshot(symbol, ticket, entry_price, sl_price, tp_price, gann_data=None, timeframe_str="M30", entry_time_str=None, exit_time_str=None, exit_price=None, result=None, profit_usd=None, strategy_label="Gann"):
     """
     Fetches historical candle data from MT5 and plots the candlesticks along with
     Entry, TP, and SL horizontal lines, and highlights the Gann A-B-C pivot structure.
@@ -209,7 +209,11 @@ def generate_chart_screenshot(symbol, ticket, entry_price, sl_price, tp_price, g
     # Prepare title text
     setup_title = f"{symbol} ({timeframe_str}) - Trade #{ticket}"
     if gann_data:
-        setup_title += f"\nGann Setup: A={gann_data.get('A', 0):.5f}, B={gann_data.get('B', 0):.5f}, C={gann_data.get('C', 0):.5f} ({gann_data.get('type', '')})"
+        setup_title += f"\n{strategy_label} Setup: A={gann_data.get('A', 0):.5f}, B={gann_data.get('B', 0):.5f}, C={gann_data.get('C', 0):.5f} ({gann_data.get('type', '')})"
+
+    point_labels = {
+        "Elliott Wave": ("Wave 0 (Start)", "Wave 1 (Peak)", "Wave 2 (Correction)"),
+    }.get(strategy_label, ("Point A (Origin)", "Point B (Breakout)", "Point C (Correction)"))
         
     # Plot using mplfinance
     fig, axlist = mpf.plot(
@@ -255,7 +259,7 @@ def generate_chart_screenshot(symbol, ticket, entry_price, sl_price, tp_price, g
                 pivots_y.append(val_A)
                 ax.plot(idx_A, val_A, marker='o', color='#f39c12', markersize=8, zorder=5)
                 va_A = 'top' if trade_type == 'BUY' else 'bottom'
-                ax.text(idx_A, val_A, '  Point A (Origin)', color='#f39c12', fontsize=9, fontweight='bold', va=va_A, ha='left')
+                ax.text(idx_A, val_A, f'  {point_labels[0]}', color='#f39c12', fontsize=9, fontweight='bold', va=va_A, ha='left')
                 
         if idx_B is not None and idx_B >= 0:
             val_B = gann_data.get("B")
@@ -264,7 +268,7 @@ def generate_chart_screenshot(symbol, ticket, entry_price, sl_price, tp_price, g
                 pivots_y.append(val_B)
                 ax.plot(idx_B, val_B, marker='o', color='#e67e22', markersize=8, zorder=5)
                 va_B = 'bottom' if trade_type == 'BUY' else 'top'
-                ax.text(idx_B, val_B, '  Point B (Breakout)', color='#e67e22', fontsize=9, fontweight='bold', va=va_B)
+                ax.text(idx_B, val_B, f'  {point_labels[1]}', color='#e67e22', fontsize=9, fontweight='bold', va=va_B)
                 
         if idx_C is not None and idx_C >= 0:
             val_C = gann_data.get("C")
@@ -273,7 +277,7 @@ def generate_chart_screenshot(symbol, ticket, entry_price, sl_price, tp_price, g
                 pivots_y.append(val_C)
                 ax.plot(idx_C, val_C, marker='o', color='#3498db', markersize=8, zorder=5)
                 va_C = 'top' if trade_type == 'BUY' else 'bottom'
-                ax.text(idx_C, val_C, '  Point C (Correction)', color='#3498db', fontsize=9, fontweight='bold', va=va_C)
+                ax.text(idx_C, val_C, f'  {point_labels[2]}', color='#3498db', fontsize=9, fontweight='bold', va=va_C)
                 
         if len(pivots_x) > 1:
             pivot_pts = sorted(zip(pivots_x, pivots_y))

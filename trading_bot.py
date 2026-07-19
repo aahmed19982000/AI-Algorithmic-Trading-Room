@@ -26,7 +26,7 @@ from db_manager import (
     get_active_trades, 
     log_balance_snapshot
 )
-from gann_helper import detect_market_structure, calculate_gann_levels
+from gann_helper import detect_market_structure, calculate_gann_levels, detect_elliott_wave2_setup, calculate_fibonacci_extension
 
 # Load configuration
 load_dotenv()
@@ -216,6 +216,38 @@ def check_m5_exit_signal(symbol, pos_type):
     return False
 
 
+def check_elliott_wave4_overlap(ticket, pos_type, current_price):
+    """
+    Elliott Wave invalidation check for an open position: Wave 4 must never
+    overlap Wave 1's price territory (a core, non-negotiable Elliott rule).
+    Looks up the Wave 0/1/2 context stored at entry time (in the trade's
+    gann_data column — reused generically, not Gann-specific) and checks
+    whether price has moved back past the stored Wave 1 (B) level.
+
+    Returns True if the count is invalidated (position should be closed now).
+    """
+    from db_manager import get_trade_by_ticket
+    import json
+
+    trade = get_trade_by_ticket(ticket)
+    if not trade or not trade.get("gann_data"):
+        return False
+
+    try:
+        context = json.loads(trade["gann_data"])
+        wave1_price = context.get("B")
+    except Exception:
+        return False
+
+    if wave1_price is None:
+        return False
+
+    if pos_type == 0:  # BUY: Wave 4 must stay above Wave 1 (B)
+        return current_price < wave1_price
+    else:  # SELL: Wave 4 must stay below Wave 1 (B)
+        return current_price > wave1_price
+
+
 def calculate_lot_size(symbol, sl_price, entry_price, risk_percent=1.0):
     """
     Calculate position size (lots) based on risk percentage of account balance
@@ -356,6 +388,41 @@ def check_technical_strategy_signals(df, symbol):
         reasons.append(f"RSI 14 ({rsi_curr:.1f}) out of range/trend")
 
     return "HOLD", "Technical Hold - " + " & ".join(reasons)
+
+
+def check_sma5_reversion_signal(df, current_price, threshold_pct=0.3, rsi_overbought=65.0, rsi_oversold=35.0):
+    """
+    Mean-reversion signal: compares the live current price against the SMA(5)
+    of the last 5 completed candles. A large enough deviation is read as price
+    being "stretched" away from its short-term average, betting it reverts
+    back toward that average. Confirmed with RSI(14): only take the trade if
+    momentum is genuinely exhausted (overbought/oversold), not just mid-trend.
+
+    Returns:
+        (decision, reason, sma5): decision is "BUY"/"SELL"/"HOLD"; sma5 is the
+        computed SMA(5) value (or None if not enough data), used as the TP target.
+    """
+    if len(df) < 20:
+        return "HOLD", f"Not enough candle data for SMA5+RSI14 ({len(df)} candles, minimum 20 required).", None
+
+    sma5 = df['Close'].iloc[-6:-1].mean()  # last 5 completed candles
+    deviation_pct = (current_price - sma5) / sma5 * 100.0
+
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rsi14 = (100 - (100 / (1 + gain / loss))).iloc[-2]  # last completed candle
+
+    if deviation_pct >= threshold_pct:
+        if rsi14 < rsi_overbought:
+            return "HOLD", f"Deviation {deviation_pct:.2f}% above SMA5 but RSI14 ({rsi14:.1f}) not overbought (>{rsi_overbought}) — momentum not exhausted.", sma5
+        return "SELL", f"Price {deviation_pct:.2f}% above SMA5 ({sma5:.5f}), RSI14 {rsi14:.1f} confirms overbought — expecting reversion down.", sma5
+    elif deviation_pct <= -threshold_pct:
+        if rsi14 > rsi_oversold:
+            return "HOLD", f"Deviation {abs(deviation_pct):.2f}% below SMA5 but RSI14 ({rsi14:.1f}) not oversold (<{rsi_oversold}) — momentum not exhausted.", sma5
+        return "BUY", f"Price {abs(deviation_pct):.2f}% below SMA5 ({sma5:.5f}), RSI14 {rsi14:.1f} confirms oversold — expecting reversion up.", sma5
+    else:
+        return "HOLD", f"Deviation {deviation_pct:.2f}% below {threshold_pct}% threshold.", sma5
 
 
 def sync_db_with_mt5_positions():
@@ -530,9 +597,13 @@ def manage_active_positions_grid():
 
         print(f"[PROTECTION INFO] Symbol {symbol} has {len(pos_list)} active trades. Current profit/drawdown pips from last trade: {-drawdown_pips:.1f} pips.")
 
-        # Check if we need to open the next leg (ONLY if Grid is explicitly enabled and not a Gann trade)
+        # Check if we need to open the next leg (ONLY if Grid is explicitly enabled, and not a
+        # Gann, SMA5-reversion, or Elliott Wave trade — all three manage their own SL/TP and
+        # shouldn't get martingale legs)
         is_gann_trade = any("gann" in (pos.comment or "").lower() for pos in pos_list)
-        if grid_enabled and not is_gann_trade and drawdown_pips >= grid_step:
+        is_sma5_trade = any("sma5" in (pos.comment or "").lower() for pos in pos_list)
+        is_elliott_trade = any("elliott" in (pos.comment or "").lower() for pos in pos_list)
+        if grid_enabled and not is_gann_trade and not is_sma5_trade and not is_elliott_trade and drawdown_pips >= grid_step:
             if len(pos_list) < max_legs:
                 print(f"[GRID TRIGGER] Drawdown ({drawdown_pips:.1f} pips) >= Grid Step ({grid_step} pips). Opening next leg!")
                 
@@ -577,10 +648,14 @@ def manage_active_positions_grid():
             weighted_entry = sum(p.price_open * p.volume for p in pos_list) / total_vol
             
             is_gann_trade = any("gann" in (pos.comment or "").lower() for pos in pos_list)
+            is_sma5_trade = any("sma5" in (pos.comment or "").lower() for pos in pos_list)
+            is_elliott_trade = any("elliott" in (pos.comment or "").lower() for pos in pos_list)
+            preserve_original_tp_sl = is_gann_trade or is_sma5_trade or is_elliott_trade
+            strategy_label = "Gann" if is_gann_trade else ("SMA5 reversion" if is_sma5_trade else "Elliott Wave")
 
-            if is_gann_trade and pos_list[0].tp > 0:
+            if preserve_original_tp_sl and pos_list[0].tp > 0:
                 tp_price = pos_list[0].tp
-                print(f"[GRID INFO] Gann trade detected. Preserving oldest TP price: {tp_price}")
+                print(f"[GRID INFO] {strategy_label} trade detected. Preserving oldest TP price: {tp_price}")
             else:
                 if len(pos_list) == 1:
                     grid_tp = float(settings.get("grid_tp", 20.0))
@@ -590,9 +665,9 @@ def manage_active_positions_grid():
                 
             last_entry_price = pos_list[-1].price_open
             
-            if is_gann_trade and pos_list[0].sl > 0:
+            if preserve_original_tp_sl and pos_list[0].sl > 0:
                 sl_price = pos_list[0].sl
-                print(f"[GRID INFO] Gann trade detected. Preserving oldest SL price: {sl_price}")
+                print(f"[GRID INFO] {strategy_label} trade detected. Preserving oldest SL price: {sl_price}")
             else:
                 sl_price = last_entry_price - (grid_sl * pip_size) if basket_type == 'BUY' else last_entry_price + (grid_sl * pip_size)
             
@@ -610,6 +685,24 @@ def manage_active_positions_grid():
                     if close_res:
                         log_trade_close(pos.ticket, current_price, pos.profit, exit_reason="Take Profit 90% Close Early")
                 continue
+
+            # 2.5 Elliott Wave invalidation check: Wave 4 must never overlap Wave 1's
+            # price territory. If price has moved back past the stored Wave 1 (B)
+            # level, the wave count is proven wrong — exit now instead of waiting
+            # for the fixed SL (which sits further back at Wave 0/A).
+            if is_elliott_trade:
+                any_closed = False
+                for pos in pos_list:
+                    if "elliott" not in (pos.comment or "").lower():
+                        continue
+                    if check_elliott_wave4_overlap(pos.ticket, 0 if basket_type == 'BUY' else 1, current_price):
+                        print(f"[ELLIOTT INVALIDATION] Wave 4 overlap detected on {symbol} (ticket #{pos.ticket}). Closing — wave count invalidated.")
+                        close_res = close_position(ticket=pos.ticket, comment="Elliott Wave 4 Overlap")
+                        if close_res:
+                            log_trade_close(pos.ticket, current_price, pos.profit, exit_reason="Elliott Wave 4 overlap invalidation")
+                            any_closed = True
+                if any_closed:
+                    continue
                 
             # 3. Check M5 Swing Exit
             if check_m5_exit_signal(symbol, 0 if basket_type == 'BUY' else 1):
@@ -661,6 +754,376 @@ def manage_active_positions_grid():
                 if abs(pos.sl - sl_price) > 0.5 * point or abs(pos.tp - tp_price) > 0.5 * point:
                     print(f"[GRID UPDATE] Modifying SL/TP for position #{pos.ticket}. New SL: {sl_price}, New TP: {tp_price}")
                     modify_position_sl_tp(pos.ticket, sl_price, tp_price)
+
+
+def manage_sma5_reversion_strategy(settings, active_news_events, risk_percent, auto_trade_enabled):
+    """
+    Independent, parallel strategy: bets on price reverting to its SMA(5) once
+    it strays far enough away. Runs its own signal check, pre-trade filters,
+    and SL/TP/lot-size pipeline — deliberately decoupled from the Gann loop
+    above so neither strategy's `continue`s or state can interfere with the other.
+
+    Trades its own symbol list (`sma5_reversion_symbols`), independent of the
+    Gann strategy's `symbols` setting — backtesting showed several symbols are
+    a poor fit for this specific strategy (see sma5_reversion_symbols default).
+    """
+    if int(settings.get("sma5_reversion_enabled", 1)) != 1:
+        return
+
+    sma5_symbols = settings.get("sma5_reversion_symbols", [])
+    threshold_pct = float(settings.get("sma5_reversion_threshold_pct", 0.3))
+    sl_multiplier = float(settings.get("sma5_reversion_sl_multiplier", 1.5))
+    min_rr_ratio = float(settings.get("sma5_reversion_min_rr_ratio", 0.5))
+    rsi_overbought = float(settings.get("sma5_reversion_rsi_overbought", 65.0))
+    rsi_oversold = float(settings.get("sma5_reversion_rsi_oversold", 35.0))
+    min_tp_spread_multiple = float(settings.get("sma5_reversion_min_tp_spread_multiple", 2.0))
+
+    for symbol in sma5_symbols:
+        try:
+            # News freeze check (reuses the same events computed once per cycle)
+            if any(event["currency"].upper() in symbol.upper() for event in active_news_events):
+                continue
+
+            candles_df = get_candles(symbol=symbol, timeframe=get_timeframe(DEFAULT_TIMEFRAME), count=50)
+            if candles_df is None or len(candles_df) < 20:
+                continue
+
+            price_info = get_current_price(symbol)
+            if not price_info:
+                continue
+
+            mid_price = (price_info['bid'] + price_info['ask']) / 2.0
+            decision, reason, sma5 = check_sma5_reversion_signal(candles_df, mid_price, threshold_pct, rsi_overbought, rsi_oversold)
+
+            if decision == "HOLD":
+                continue
+
+            # Duplicate same-direction entry guard
+            symbol_positions = [
+                pos for pos in get_open_positions()
+                if pos.magic == MAGIC_NUMBER and pos.symbol == symbol and "sma5" in (pos.comment or "").lower()
+            ]
+            pos_type_str_map = {0: "BUY", 1: "SELL"}
+            if any(pos_type_str_map.get(pos.type) == decision for pos in symbol_positions):
+                continue
+
+            # Stop-loss cooldown reuse (no Gann-specific setup context here)
+            if is_setup_stopped_out(symbol, None, decision):
+                continue
+
+            symbol_info = mt5.symbol_info(symbol)
+            if not symbol_info:
+                continue
+
+            entry_price = price_info['ask'] if decision == "BUY" else price_info['bid']
+            deviation_distance = abs(entry_price - sma5)
+            sl_distance = sl_multiplier * deviation_distance
+            sl = entry_price - sl_distance if decision == "BUY" else entry_price + sl_distance
+            tp = sma5
+
+            sl = round(sl, symbol_info.digits)
+            tp = round(tp, symbol_info.digits)
+
+            sl_dist = abs(entry_price - sl)
+            tp_dist = abs(tp - entry_price)
+            if sl_dist <= 0:
+                print(f"[SMA5 REVERSION] {symbol} rejected: Stop Loss at or ahead of entry price.")
+                continue
+
+            # Spread guard: MT5 closes a BUY at Bid and a SELL at Ask, not at the mid-price
+            # the TP was computed from — so the spread eats directly into this strategy's
+            # small reversion target. If the target isn't comfortably bigger than the current
+            # spread, the position may sit open long past "reaching" its nominal TP, or never
+            # close at all. Require the target to be at least a configurable multiple of spread.
+            spread = price_info['ask'] - price_info['bid']
+            if tp_dist < spread * min_tp_spread_multiple:
+                print(f"[SMA5 REVERSION] {symbol} rejected: TP distance ({tp_dist:.5f}) too small relative to spread ({spread:.5f}) — would rarely/never close at target.")
+                continue
+
+            rr_ratio = tp_dist / sl_dist
+            if rr_ratio < min_rr_ratio:
+                print(f"[SMA5 REVERSION] {symbol} rejected: R:R 1:{rr_ratio:.2f} below strategy floor 1:{min_rr_ratio:.2f}.")
+                continue
+
+            volume = calculate_lot_size(symbol, sl, entry_price, risk_percent=risk_percent)
+            reason_msg = f"SMA5 Reversion: {reason}"
+
+            if not auto_trade_enabled:
+                print(f"[SMA5 REVERSION] Signal-Only Mode: {decision} on {symbol} at {entry_price} (SL: {sl}, TP: {tp}). Not executed.")
+                last_scan_reports[f"{symbol}_sma5"] = {
+                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                    "status": "Signal Only (SMA5)",
+                    "details": reason_msg,
+                    "structure": None
+                }
+                continue
+
+            trade_res = open_trade(
+                action=decision,
+                symbol=symbol,
+                volume=volume,
+                sl=sl,
+                tp=tp,
+                magic=MAGIC_NUMBER,
+                comment=f"SMA5 Reversion {decision}"[:28]
+            )
+
+            if trade_res and trade_res["success"]:
+                log_trade_open(
+                    ticket=trade_res["ticket"],
+                    symbol=symbol,
+                    action=decision,
+                    volume=volume,
+                    entry_price=trade_res["price"],
+                    sl=sl,
+                    tp=tp,
+                    reason=reason_msg
+                )
+                print(f"[SMA5 REVERSION] Executed {decision} {volume} lots on {symbol} at {trade_res['price']} (SL: {sl}, TP: {tp}). Ticket: {trade_res['ticket']}.")
+                last_scan_reports[f"{symbol}_sma5"] = {
+                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                    "status": f"Executed {decision} (SMA5)",
+                    "details": reason_msg,
+                    "structure": None
+                }
+
+                entry_time_str = time.strftime('%Y-%m-%d %H:%M:%S')
+                screenshot_url = None
+                try:
+                    from chart_generator import generate_chart_screenshot
+                    from db_manager import update_trade_screenshot
+
+                    screenshot_url = generate_chart_screenshot(
+                        symbol=symbol,
+                        ticket=trade_res["ticket"],
+                        entry_price=trade_res["price"],
+                        sl_price=sl,
+                        tp_price=tp,
+                        timeframe_str=DEFAULT_TIMEFRAME,
+                        entry_time_str=entry_time_str
+                    )
+                    update_trade_screenshot(trade_res["ticket"], screenshot_url)
+                    print(f"[SCREENSHOT] Saved SMA5 trade chart to {screenshot_url}")
+                except Exception as ex:
+                    print(f"[SCREENSHOT] [ERROR] Failed to save SMA5 screenshot: {ex}")
+
+                try:
+                    from telegram_notifier import notify_trade_open
+                    from db_manager import update_trade_telegram_msg_id
+                    msg_id = notify_trade_open(
+                        ticket=trade_res["ticket"],
+                        symbol=symbol,
+                        action=decision,
+                        volume=volume,
+                        entry_price=trade_res["price"],
+                        sl=sl,
+                        tp=tp,
+                        reason=reason_msg,
+                        screenshot_url=screenshot_url
+                    )
+                    if msg_id:
+                        update_trade_telegram_msg_id(trade_res["ticket"], msg_id)
+                        print(f"[TELEGRAM] SMA5 reversion trade open notification sent (Msg ID: {msg_id})")
+                except Exception as tg_ex:
+                    print(f"[TELEGRAM] [ERROR] Failed to send SMA5 reversion open alert: {tg_ex}")
+            else:
+                print(f"[SMA5 REVERSION] [ERROR] Failed to execute trade order for {symbol}.")
+        except Exception as sma5_ex:
+            print(f"[SMA5 REVERSION] [ERROR] {symbol}: {sma5_ex}")
+
+
+def manage_elliott_wave_strategy(settings, active_news_events, risk_percent, auto_trade_enabled):
+    """
+    Independent, parallel strategy: enters after a completed Elliott Wave 2
+    retracement, targeting the Wave 3 Fibonacci extension. Structured exactly
+    like manage_sma5_reversion_strategy() — its own symbol list, its own
+    signal source, its own SL/TP/lot-size pipeline — so none of the three
+    strategies' `continue`s or state can interfere with each other.
+
+    SL sits at Wave 0 (the point A price) — this is not an arbitrary choice,
+    it is the exact Elliott invalidation level ("Wave 2 never retraces beyond
+    Wave 1's start"), so the stop-loss and the rule are the same price.
+    """
+    if int(settings.get("elliott_wave_enabled", 1)) != 1:
+        return
+
+    elliott_symbols = settings.get("elliott_wave_symbols", [])
+    lookback = int(settings.get("elliott_wave_lookback", 100))
+    min_retracement = float(settings.get("elliott_wave_min_retracement", 0.382))
+    max_retracement = float(settings.get("elliott_wave_max_retracement", 0.786))
+    max_wave1_internal_retracement = float(settings.get("elliott_wave_max_wave1_internal_retracement", 0.618))
+    extension_ratio = float(settings.get("elliott_wave_extension_ratio", 1.618))
+    min_rr_ratio = float(settings.get("elliott_wave_min_rr_ratio", 1.0))
+
+    for symbol in elliott_symbols:
+        try:
+            # News freeze check (reuses the same events computed once per cycle)
+            if any(event["currency"].upper() in symbol.upper() for event in active_news_events):
+                continue
+
+            candles_df = get_candles(symbol=symbol, timeframe=get_timeframe(DEFAULT_TIMEFRAME), count=lookback + 50)
+            if candles_df is None or len(candles_df) < 20:
+                continue
+
+            setup = detect_elliott_wave2_setup(
+                candles_df, lookback=lookback,
+                min_retracement=min_retracement, max_retracement=max_retracement,
+                max_wave1_internal_retracement=max_wave1_internal_retracement
+            )
+            if not setup:
+                continue
+
+            # Freshness: Wave 2 (point C) must have completed recently, not ancient history
+            last_idx = len(candles_df) - 1
+            if last_idx - setup["idx_C"] > 5:
+                continue
+
+            price_info = get_current_price(symbol)
+            if not price_info:
+                continue
+            mid_price = (price_info['bid'] + price_info['ask']) / 2.0
+
+            decision = setup["type"]
+            wave0, wave1, wave2 = setup["A"], setup["B"], setup["C"]
+
+            # Entry confirmation: price must already be reversing away from C in the
+            # Wave 1 direction (Wave 2 has bottomed/topped and Wave 3 is beginning)
+            if decision == "BUY" and mid_price <= wave2:
+                continue
+            if decision == "SELL" and mid_price >= wave2:
+                continue
+
+            # Duplicate same-direction entry guard
+            symbol_positions = [
+                pos for pos in get_open_positions()
+                if pos.magic == MAGIC_NUMBER and pos.symbol == symbol and "elliott" in (pos.comment or "").lower()
+            ]
+            pos_type_str_map = {0: "BUY", 1: "SELL"}
+            if any(pos_type_str_map.get(pos.type) == decision for pos in symbol_positions):
+                continue
+
+            # Stop-loss cooldown reuse (no Gann-specific setup context here)
+            if is_setup_stopped_out(symbol, None, decision):
+                continue
+
+            symbol_info = mt5.symbol_info(symbol)
+            if not symbol_info:
+                continue
+
+            entry_price = price_info['ask'] if decision == "BUY" else price_info['bid']
+            sl = wave0  # Wave 0 = the exact Elliott invalidation level
+            tp = calculate_fibonacci_extension(wave0, wave1, extension_ratio)  # Wave 3 target
+
+            sl = round(sl, symbol_info.digits)
+            tp = round(tp, symbol_info.digits)
+
+            sl_dist = abs(entry_price - sl)
+            tp_dist = abs(tp - entry_price)
+            if sl_dist <= 0:
+                print(f"[ELLIOTT WAVE] {symbol} rejected: Stop Loss at or ahead of entry price.")
+                continue
+
+            rr_ratio = tp_dist / sl_dist
+            if rr_ratio < min_rr_ratio:
+                print(f"[ELLIOTT WAVE] {symbol} rejected: R:R 1:{rr_ratio:.2f} below strategy floor 1:{min_rr_ratio:.2f}.")
+                continue
+
+            volume = calculate_lot_size(symbol, sl, entry_price, risk_percent=risk_percent)
+            reason_msg = (
+                f"Elliott Wave: Wave 2 retracement {setup['retracement_pct']:.1f}% of Wave 1 "
+                f"(A={wave0:.5f}, B={wave1:.5f}, C={wave2:.5f}) — targeting Wave 3 extension at {tp:.5f}."
+            )
+            wave_context = {
+                "type": decision, "A": wave0, "B": wave1, "C": wave2,
+                "retracement_pct": setup["retracement_pct"], "extension_ratio": extension_ratio,
+                "time_A": setup.get("time_A"), "time_B": setup.get("time_B"), "time_C": setup.get("time_C")
+            }
+
+            if not auto_trade_enabled:
+                print(f"[ELLIOTT WAVE] Signal-Only Mode: {decision} on {symbol} at {entry_price} (SL: {sl}, TP: {tp}). Not executed.")
+                last_scan_reports[f"{symbol}_elliott"] = {
+                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                    "status": "Signal Only (Elliott)",
+                    "details": reason_msg,
+                    "structure": wave_context
+                }
+                continue
+
+            trade_res = open_trade(
+                action=decision,
+                symbol=symbol,
+                volume=volume,
+                sl=sl,
+                tp=tp,
+                magic=MAGIC_NUMBER,
+                comment=f"Elliott Wave {decision}"[:28]
+            )
+
+            if trade_res and trade_res["success"]:
+                log_trade_open(
+                    ticket=trade_res["ticket"],
+                    symbol=symbol,
+                    action=decision,
+                    volume=volume,
+                    entry_price=trade_res["price"],
+                    sl=sl,
+                    tp=tp,
+                    reason=reason_msg,
+                    gann_data=wave_context
+                )
+                print(f"[ELLIOTT WAVE] Executed {decision} {volume} lots on {symbol} at {trade_res['price']} (SL: {sl}, TP: {tp}). Ticket: {trade_res['ticket']}.")
+                last_scan_reports[f"{symbol}_elliott"] = {
+                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                    "status": f"Executed {decision} (Elliott)",
+                    "details": reason_msg,
+                    "structure": wave_context
+                }
+
+                entry_time_str = time.strftime('%Y-%m-%d %H:%M:%S')
+                screenshot_url = None
+                try:
+                    from chart_generator import generate_chart_screenshot
+                    from db_manager import update_trade_screenshot
+
+                    screenshot_url = generate_chart_screenshot(
+                        symbol=symbol,
+                        ticket=trade_res["ticket"],
+                        entry_price=trade_res["price"],
+                        sl_price=sl,
+                        tp_price=tp,
+                        gann_data=wave_context,
+                        timeframe_str=DEFAULT_TIMEFRAME,
+                        entry_time_str=entry_time_str,
+                        strategy_label="Elliott Wave"
+                    )
+                    update_trade_screenshot(trade_res["ticket"], screenshot_url)
+                    print(f"[SCREENSHOT] Saved Elliott Wave trade chart to {screenshot_url}")
+                except Exception as ex:
+                    print(f"[SCREENSHOT] [ERROR] Failed to save Elliott Wave screenshot: {ex}")
+
+                try:
+                    from telegram_notifier import notify_trade_open
+                    from db_manager import update_trade_telegram_msg_id
+                    msg_id = notify_trade_open(
+                        ticket=trade_res["ticket"],
+                        symbol=symbol,
+                        action=decision,
+                        volume=volume,
+                        entry_price=trade_res["price"],
+                        sl=sl,
+                        tp=tp,
+                        reason=reason_msg,
+                        screenshot_url=screenshot_url
+                    )
+                    if msg_id:
+                        update_trade_telegram_msg_id(trade_res["ticket"], msg_id)
+                        print(f"[TELEGRAM] Elliott Wave trade open notification sent (Msg ID: {msg_id})")
+                except Exception as tg_ex:
+                    print(f"[TELEGRAM] [ERROR] Failed to send Elliott Wave open alert: {tg_ex}")
+            else:
+                print(f"[ELLIOTT WAVE] [ERROR] Failed to execute trade order for {symbol}.")
+        except Exception as elliott_ex:
+            print(f"[ELLIOTT WAVE] [ERROR] {symbol}: {elliott_ex}")
 
 
 def check_and_execute_trading_cycle():
@@ -1466,6 +1929,21 @@ def check_and_execute_trading_cycle():
             print(f"\n➡️ [AI DECISION] {decision}")
             print(f"  Reasoning: {reasoning[:300]}")
 
+    # 4. Run the SMA(5) mean-reversion strategy — fully independent of the Gann
+    # loop above, its own signal source, its own pre-trade filters, its own SL/TP.
+    if not max_positions_reached:
+        try:
+            manage_sma5_reversion_strategy(settings, active_news_events, risk_percent, auto_trade_enabled)
+        except Exception as sma5_cycle_ex:
+            print(f"[ERROR] SMA5 reversion strategy pass failed: {sma5_cycle_ex}")
+
+    # 5. Run the Elliott Wave strategy — same independence guarantee as SMA5 above.
+    if not max_positions_reached:
+        try:
+            manage_elliott_wave_strategy(settings, active_news_events, risk_percent, auto_trade_enabled)
+        except Exception as elliott_cycle_ex:
+            print(f"[ERROR] Elliott Wave strategy pass failed: {elliott_cycle_ex}")
+
     # Fetch latest open positions for the report
     try:
         latest_active = get_open_positions()
@@ -1612,6 +2090,21 @@ def check_and_execute_trading_cycle():
                     f"• التكلفة التقديرية للدورة: `${cycle_cost:.5f} USD`\n\n"
                 )
 
+            # Per-strategy performance breakdown (all closed trades, attributed via reason text)
+            strategy_perf_str = ""
+            try:
+                from db_manager import get_strategy_performance_summary
+                strategy_summary = get_strategy_performance_summary()
+                if strategy_summary:
+                    lines = []
+                    for strat_name, stats in strategy_summary.items():
+                        total = stats["wins"] + stats["losses"]
+                        wr = (stats["wins"] / total * 100.0) if total > 0 else 0.0
+                        lines.append(f"• *{strat_name}:* `{stats['wins']}W/{stats['losses']}L` ({wr:.0f}%) — `${stats['profit']:+.2f}`")
+                    strategy_perf_str = "📊 *أداء كل استراتيجية (Strategy Performance):*\n" + "\n".join(lines) + "\n\n"
+            except Exception as strat_perf_ex:
+                print(f"[ERROR] Failed to build strategy performance summary: {strat_perf_ex}")
+
             report_msg = (
                 f"🔄 *تقرير دورة الفحص (Scanning Cycle Report)*\n"
                 f"⏰ *الوقت:* `{time.strftime('%Y-%m-%d %H:%M:%S')}`\n\n"
@@ -1623,6 +2116,7 @@ def check_and_execute_trading_cycle():
                 f"• إجمالي الصفقات: `{active_count}` صفقات\n"
                 f"• إجمالي العقود: `{total_lots:.2f} lots`\n"
                 f"• الأرباح العائمة: `{total_profit:+.2f} {currency}`\n\n"
+                f"{strategy_perf_str}"
                 f"{usage_str}"
                 f"🎯 *أحداث الدورة الحالية (Current Signals):*\n"
                 f"{signals_str}\n{ai_err_str}\n"
