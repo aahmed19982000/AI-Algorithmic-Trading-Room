@@ -2120,7 +2120,9 @@ def check_and_execute_trading_cycle():
                 f"{usage_str}"
                 f"🎯 *أحداث الدورة الحالية (Current Signals):*\n"
                 f"{signals_str}\n{ai_err_str}\n"
-                f"⚙️ تم فحص {len(symbols_to_trade)} أزواج بنجاح."
+                f"⚙️ تم فحص {len(symbols_to_trade)} زوج (Gann) + "
+                f"{len(settings.get('sma5_reversion_symbols', []))} (SMA5) + "
+                f"{len(settings.get('elliott_wave_symbols', []))} (Elliott) بنجاح."
             )
             send_telegram_message(token, chat_id, report_msg)
             print("[TELEGRAM] Scanning cycle report sent successfully.")
