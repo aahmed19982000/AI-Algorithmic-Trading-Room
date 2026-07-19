@@ -179,6 +179,22 @@ def init_db():
         "elliott_wave_max_wave1_internal_retracement": "0.618",
         "elliott_wave_extension_ratio": "1.618",
         "elliott_wave_min_rr_ratio": "1.0",
+        "volatility_breakout_enabled": "1",
+        "volatility_breakout_symbols": json.dumps([
+            "EURUSDm", "GBPUSDm", "USDJPYm", "XAUUSDm", "AUDUSDm", "USDCADm"
+        ]),
+        "volatility_breakout_bb_period": "20",
+        "volatility_breakout_bb_stddev": "2.0",
+        "volatility_breakout_squeeze_lookback": "50",
+        "volatility_breakout_squeeze_percentile": "20.0",
+        "volatility_breakout_atr_period": "14",
+        "volatility_breakout_atr_sl_multiplier": "1.5",
+        "volatility_breakout_rr_ratio": "1.5",
+        "volatility_breakout_min_rr_ratio": "1.2",
+        "volatility_breakout_min_tp_spread_multiple": "3.0",
+        "volatility_breakout_mtf_enabled": "1",
+        "volatility_breakout_mtf_timeframe": "D1",
+        "volatility_breakout_mtf_ema_period": "50",
         "telegram_enabled": "0",
         "telegram_token": "",
         "telegram_chat_id": "",
@@ -329,14 +345,16 @@ def classify_trade_strategy(reason):
     """
     Identifies which strategy opened a trade from its `reason` text — every
     strategy already prefixes its own reason string ("Gann: ...",
-    "SMA5 Reversion: ...", "Pure Technical: ..."), so no separate DB column
-    is needed for attribution.
+    "SMA5 Reversion: ...", "Volatility Breakout: ...", "Pure Technical: ..."),
+    so no separate DB column is needed for attribution.
     """
     text = (reason or "").lower()
     if "sma5 reversion" in text:
         return "SMA5 Reversion"
     if "elliott wave" in text:
         return "Elliott Wave"
+    if "volatility breakout" in text:
+        return "Volatility Breakout"
     if "gann" in text:
         return "Gann"
     return "Technical Fallback"

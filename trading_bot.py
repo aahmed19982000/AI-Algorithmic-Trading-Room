@@ -425,6 +425,96 @@ def check_sma5_reversion_signal(df, current_price, threshold_pct=0.3, rsi_overbo
         return "HOLD", f"Deviation {deviation_pct:.2f}% below {threshold_pct}% threshold.", sma5
 
 
+def check_volatility_breakout_signal(df, bb_period=20, bb_stddev=2.0, squeeze_lookback=50,
+                                      squeeze_percentile=20.0, atr_period=14):
+    """
+    Volatility-regime signal: waits for a Bollinger Band "squeeze" (bandwidth
+    contracted into the bottom percentile of its recent range, i.e. a genuine
+    low-volatility compression) followed by a close breaking outside the bands
+    on the very next candle. Trades the breakout direction with ATR(atr_period)
+    as the volatility-scaled distance for SL/TP sizing.
+
+    Returns:
+        (decision, reason, atr_value): decision is "BUY"/"SELL"/"HOLD";
+        atr_value is the ATR reading on the breakout candle (or None if not
+        enough data), used to size the stop-loss/take-profit distance.
+    """
+    import pandas as pd
+
+    min_required = bb_period + squeeze_lookback + 5
+    if len(df) < min_required:
+        return "HOLD", f"Not enough candle data for volatility breakout ({len(df)} candles, minimum {min_required} required).", None
+
+    df = df.copy()
+    df['bb_mid'] = df['Close'].rolling(window=bb_period).mean()
+    bb_std = df['Close'].rolling(window=bb_period).std()
+    df['bb_upper'] = df['bb_mid'] + bb_stddev * bb_std
+    df['bb_lower'] = df['bb_mid'] - bb_stddev * bb_std
+    df['bb_bandwidth'] = (df['bb_upper'] - df['bb_lower']) / df['bb_mid']
+
+    prev_close = df['Close'].shift(1)
+    tr = pd.concat([
+        df['High'] - df['Low'],
+        (df['High'] - prev_close).abs(),
+        (df['Low'] - prev_close).abs()
+    ], axis=1).max(axis=1)
+    df['atr'] = tr.rolling(window=atr_period).mean()
+
+    # Breakout candle is the last completed candle (index -2); the squeeze
+    # must have been present on the candle right before it (index -3) — same
+    # completed-candle convention as check_technical_strategy_signals().
+    breakout_close = df['Close'].iloc[-2]
+    upper = df['bb_upper'].iloc[-2]
+    lower = df['bb_lower'].iloc[-2]
+    atr_value = df['atr'].iloc[-2]
+
+    squeeze_bandwidth = df['bb_bandwidth'].iloc[-3]
+    bandwidth_window = df['bb_bandwidth'].iloc[-3 - squeeze_lookback:-3]
+    if bandwidth_window.isna().any() or pd.isna(squeeze_bandwidth) or pd.isna(atr_value):
+        return "HOLD", "Not enough valid Bollinger/ATR history to evaluate a squeeze.", None
+
+    squeeze_threshold = bandwidth_window.quantile(squeeze_percentile / 100.0)
+    was_squeezed = squeeze_bandwidth <= squeeze_threshold
+
+    if not was_squeezed:
+        return "HOLD", f"No volatility squeeze detected (prior bandwidth {squeeze_bandwidth:.5f} above the {squeeze_percentile:.0f}th percentile threshold {squeeze_threshold:.5f}).", atr_value
+
+    if breakout_close > upper:
+        return "BUY", f"Volatility breakout BUY: squeeze (bandwidth {squeeze_bandwidth:.5f} <= {squeeze_percentile:.0f}th pct) followed by close {breakout_close:.5f} above upper band {upper:.5f}. ATR({atr_period}): {atr_value:.5f}.", atr_value
+    elif breakout_close < lower:
+        return "SELL", f"Volatility breakout SELL: squeeze (bandwidth {squeeze_bandwidth:.5f} <= {squeeze_percentile:.0f}th pct) followed by close {breakout_close:.5f} below lower band {lower:.5f}. ATR({atr_period}): {atr_value:.5f}.", atr_value
+
+    return "HOLD", f"Squeeze detected but breakout candle close ({breakout_close:.5f}) still inside bands [{lower:.5f}, {upper:.5f}].", atr_value
+
+
+def get_higher_timeframe_trend(symbol, timeframe_str="D1", ema_period=50):
+    """
+    Cross-checks trend direction on a higher timeframe than the strategy is
+    trading on. Fetches enough candles for a stable EMA(ema_period), then
+    compares the last completed close against it.
+
+    Returns "BULLISH", "BEARISH", or "NEUTRAL" (also used as the failure/
+    insufficient-data fallback, which callers should treat as "no confirmation").
+    """
+    tf_constant = get_timeframe(timeframe_str)
+    if tf_constant is None:
+        return "NEUTRAL"
+
+    htf_df = get_candles(symbol=symbol, timeframe=tf_constant, count=ema_period + 10)
+    if htf_df is None or len(htf_df) < ema_period + 2:
+        return "NEUTRAL"
+
+    ema = htf_df['Close'].ewm(span=ema_period, adjust=False).mean()
+    last_close = htf_df['Close'].iloc[-2]
+    last_ema = ema.iloc[-2]
+
+    if last_close > last_ema:
+        return "BULLISH"
+    elif last_close < last_ema:
+        return "BEARISH"
+    return "NEUTRAL"
+
+
 def sync_db_with_mt5_positions():
     """
     Sync open positions from MT5 to SQLite database.
@@ -1124,6 +1214,202 @@ def manage_elliott_wave_strategy(settings, active_news_events, risk_percent, aut
                 print(f"[ELLIOTT WAVE] [ERROR] Failed to execute trade order for {symbol}.")
         except Exception as elliott_ex:
             print(f"[ELLIOTT WAVE] [ERROR] {symbol}: {elliott_ex}")
+
+
+def manage_volatility_breakout_strategy(settings, active_news_events, risk_percent, auto_trade_enabled):
+    """
+    Independent, parallel strategy: trades ATR-sized breakouts out of a
+    Bollinger Band volatility squeeze. Structured exactly like
+    manage_sma5_reversion_strategy() — its own symbol list, its own signal
+    source, its own SL/TP/lot-size pipeline — so none of the four strategies'
+    `continue`s or state can interfere with each other.
+
+    Optionally gated by a higher-timeframe (default D1) EMA trend check via
+    get_higher_timeframe_trend() — a breakout is only taken if the higher
+    timeframe agrees with its direction, filtering out breakouts that fire
+    against the dominant trend.
+    """
+    if int(settings.get("volatility_breakout_enabled", 1)) != 1:
+        return
+
+    volbreak_symbols = settings.get("volatility_breakout_symbols", [])
+    bb_period = int(settings.get("volatility_breakout_bb_period", 20))
+    bb_stddev = float(settings.get("volatility_breakout_bb_stddev", 2.0))
+    squeeze_lookback = int(settings.get("volatility_breakout_squeeze_lookback", 50))
+    squeeze_percentile = float(settings.get("volatility_breakout_squeeze_percentile", 20.0))
+    atr_period = int(settings.get("volatility_breakout_atr_period", 14))
+    atr_sl_multiplier = float(settings.get("volatility_breakout_atr_sl_multiplier", 1.5))
+    rr_ratio_target = float(settings.get("volatility_breakout_rr_ratio", 1.5))
+    min_rr_ratio = float(settings.get("volatility_breakout_min_rr_ratio", 1.2))
+    min_tp_spread_multiple = float(settings.get("volatility_breakout_min_tp_spread_multiple", 3.0))
+    mtf_enabled = int(settings.get("volatility_breakout_mtf_enabled", 1)) == 1
+    mtf_timeframe = settings.get("volatility_breakout_mtf_timeframe", "D1")
+    mtf_ema_period = int(settings.get("volatility_breakout_mtf_ema_period", 50))
+
+    count_to_fetch = bb_period + squeeze_lookback + 20
+
+    for symbol in volbreak_symbols:
+        try:
+            # News freeze check (reuses the same events computed once per cycle)
+            if any(event["currency"].upper() in symbol.upper() for event in active_news_events):
+                continue
+
+            candles_df = get_candles(symbol=symbol, timeframe=get_timeframe(DEFAULT_TIMEFRAME), count=count_to_fetch)
+            if candles_df is None or len(candles_df) < count_to_fetch - 5:
+                continue
+
+            decision, reason, atr_value = check_volatility_breakout_signal(
+                candles_df, bb_period=bb_period, bb_stddev=bb_stddev,
+                squeeze_lookback=squeeze_lookback, squeeze_percentile=squeeze_percentile,
+                atr_period=atr_period
+            )
+
+            if decision == "HOLD" or atr_value is None:
+                continue
+
+            # Higher-timeframe trend confirmation: only take the breakout if the
+            # dominant trend on mtf_timeframe agrees with the breakout direction.
+            if mtf_enabled:
+                htf_trend = get_higher_timeframe_trend(symbol, timeframe_str=mtf_timeframe, ema_period=mtf_ema_period)
+                required_trend = "BULLISH" if decision == "BUY" else "BEARISH"
+                if htf_trend != required_trend:
+                    print(f"[VOLATILITY BREAKOUT] {symbol} {decision} signal rejected: higher timeframe ({mtf_timeframe}) trend is {htf_trend}, not {required_trend}.")
+                    continue
+
+            price_info = get_current_price(symbol)
+            if not price_info:
+                continue
+
+            # Duplicate same-direction entry guard
+            symbol_positions = [
+                pos for pos in get_open_positions()
+                if pos.magic == MAGIC_NUMBER and pos.symbol == symbol and "volbreak" in (pos.comment or "").lower()
+            ]
+            pos_type_str_map = {0: "BUY", 1: "SELL"}
+            if any(pos_type_str_map.get(pos.type) == decision for pos in symbol_positions):
+                continue
+
+            # Stop-loss cooldown reuse (no Gann-specific setup context here)
+            if is_setup_stopped_out(symbol, None, decision):
+                continue
+
+            symbol_info = mt5.symbol_info(symbol)
+            if not symbol_info:
+                continue
+
+            entry_price = price_info['ask'] if decision == "BUY" else price_info['bid']
+            sl_distance = atr_value * atr_sl_multiplier
+            tp_distance = sl_distance * rr_ratio_target
+            sl = entry_price - sl_distance if decision == "BUY" else entry_price + sl_distance
+            tp = entry_price + tp_distance if decision == "BUY" else entry_price - tp_distance
+
+            sl = round(sl, symbol_info.digits)
+            tp = round(tp, symbol_info.digits)
+
+            sl_dist = abs(entry_price - sl)
+            tp_dist = abs(tp - entry_price)
+            if sl_dist <= 0:
+                print(f"[VOLATILITY BREAKOUT] {symbol} rejected: Stop Loss at or ahead of entry price.")
+                continue
+
+            # Spread guard — same rationale as SMA5 reversion: require the target to
+            # be a comfortable multiple of the current spread so it can realistically close.
+            spread = price_info['ask'] - price_info['bid']
+            if tp_dist < spread * min_tp_spread_multiple:
+                print(f"[VOLATILITY BREAKOUT] {symbol} rejected: TP distance ({tp_dist:.5f}) too small relative to spread ({spread:.5f}) — would rarely/never close at target.")
+                continue
+
+            rr_ratio = tp_dist / sl_dist
+            if rr_ratio < min_rr_ratio:
+                print(f"[VOLATILITY BREAKOUT] {symbol} rejected: R:R 1:{rr_ratio:.2f} below strategy floor 1:{min_rr_ratio:.2f}.")
+                continue
+
+            volume = calculate_lot_size(symbol, sl, entry_price, risk_percent=risk_percent)
+            reason_msg = f"Volatility Breakout: {reason}"
+
+            if not auto_trade_enabled:
+                print(f"[VOLATILITY BREAKOUT] Signal-Only Mode: {decision} on {symbol} at {entry_price} (SL: {sl}, TP: {tp}). Not executed.")
+                last_scan_reports[f"{symbol}_volbreak"] = {
+                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                    "status": "Signal Only (Volatility Breakout)",
+                    "details": reason_msg,
+                    "structure": None
+                }
+                continue
+
+            trade_res = open_trade(
+                action=decision,
+                symbol=symbol,
+                volume=volume,
+                sl=sl,
+                tp=tp,
+                magic=MAGIC_NUMBER,
+                comment=f"VolBreak {decision}"[:28]
+            )
+
+            if trade_res and trade_res["success"]:
+                log_trade_open(
+                    ticket=trade_res["ticket"],
+                    symbol=symbol,
+                    action=decision,
+                    volume=volume,
+                    entry_price=trade_res["price"],
+                    sl=sl,
+                    tp=tp,
+                    reason=reason_msg
+                )
+                print(f"[VOLATILITY BREAKOUT] Executed {decision} {volume} lots on {symbol} at {trade_res['price']} (SL: {sl}, TP: {tp}). Ticket: {trade_res['ticket']}.")
+                last_scan_reports[f"{symbol}_volbreak"] = {
+                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                    "status": f"Executed {decision} (Volatility Breakout)",
+                    "details": reason_msg,
+                    "structure": None
+                }
+
+                entry_time_str = time.strftime('%Y-%m-%d %H:%M:%S')
+                screenshot_url = None
+                try:
+                    from chart_generator import generate_chart_screenshot
+                    from db_manager import update_trade_screenshot
+
+                    screenshot_url = generate_chart_screenshot(
+                        symbol=symbol,
+                        ticket=trade_res["ticket"],
+                        entry_price=trade_res["price"],
+                        sl_price=sl,
+                        tp_price=tp,
+                        timeframe_str=DEFAULT_TIMEFRAME,
+                        entry_time_str=entry_time_str,
+                        strategy_label="Volatility Breakout"
+                    )
+                    update_trade_screenshot(trade_res["ticket"], screenshot_url)
+                    print(f"[SCREENSHOT] Saved Volatility Breakout trade chart to {screenshot_url}")
+                except Exception as ex:
+                    print(f"[SCREENSHOT] [ERROR] Failed to save Volatility Breakout screenshot: {ex}")
+
+                try:
+                    from telegram_notifier import notify_trade_open
+                    from db_manager import update_trade_telegram_msg_id
+                    msg_id = notify_trade_open(
+                        ticket=trade_res["ticket"],
+                        symbol=symbol,
+                        action=decision,
+                        volume=volume,
+                        entry_price=trade_res["price"],
+                        sl=sl,
+                        tp=tp,
+                        reason=reason_msg,
+                        screenshot_url=screenshot_url
+                    )
+                    if msg_id:
+                        update_trade_telegram_msg_id(trade_res["ticket"], msg_id)
+                        print(f"[TELEGRAM] Volatility Breakout trade open notification sent (Msg ID: {msg_id})")
+                except Exception as tg_ex:
+                    print(f"[TELEGRAM] [ERROR] Failed to send Volatility Breakout open alert: {tg_ex}")
+            else:
+                print(f"[VOLATILITY BREAKOUT] [ERROR] Failed to execute trade order for {symbol}.")
+        except Exception as volbreak_ex:
+            print(f"[VOLATILITY BREAKOUT] [ERROR] {symbol}: {volbreak_ex}")
 
 
 def check_and_execute_trading_cycle():
@@ -1943,6 +2229,13 @@ def check_and_execute_trading_cycle():
             manage_elliott_wave_strategy(settings, active_news_events, risk_percent, auto_trade_enabled)
         except Exception as elliott_cycle_ex:
             print(f"[ERROR] Elliott Wave strategy pass failed: {elliott_cycle_ex}")
+
+    # 6. Run the Volatility Breakout strategy — same independence guarantee as SMA5/Elliott above.
+    if not max_positions_reached:
+        try:
+            manage_volatility_breakout_strategy(settings, active_news_events, risk_percent, auto_trade_enabled)
+        except Exception as volbreak_cycle_ex:
+            print(f"[ERROR] Volatility Breakout strategy pass failed: {volbreak_cycle_ex}")
 
     # Fetch latest open positions for the report
     try:
