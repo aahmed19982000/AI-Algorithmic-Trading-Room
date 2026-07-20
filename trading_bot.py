@@ -26,7 +26,12 @@ from db_manager import (
     get_active_trades, 
     log_balance_snapshot
 )
-from gann_helper import detect_market_structure, calculate_gann_levels, detect_elliott_wave2_setup, calculate_fibonacci_extension
+from gann_helper import (
+    detect_market_structure, calculate_gann_levels, detect_elliott_wave2_setup,
+    calculate_fibonacci_extension, detect_range_zone, calculate_adx,
+    detect_harmonic_pattern, HARMONIC_PATTERNS,
+    detect_continuation_pattern, detect_reversal_pattern
+)
 
 # Load configuration
 load_dotenv()
@@ -39,6 +44,10 @@ last_ai_scan_times = {}
 consecutive_ai_failures = {}  # per-symbol consecutive AI failure counts
 last_exit_check_candle = {}  # per-symbol M5 candle time of the last AI exit-check call
 last_exit_check_result = {}  # per-symbol cached AI exit-check result for that candle
+last_range_check_candle = {}  # per-ticket completed-candle time of the last Range Trading invalidation check
+last_range_check_result = {}  # per-ticket cached Range Trading invalidation result for that candle
+last_classical_check_candle = {}  # per-ticket completed-candle time of the last Classical Patterns invalidation check
+last_classical_check_result = {}  # per-ticket cached Classical Patterns invalidation result for that candle
 
 
 def get_db_connection():
@@ -242,9 +251,38 @@ def check_elliott_wave4_overlap(ticket, pos_type, current_price):
     if wave1_price is None:
         return False
 
-    if pos_type == 0:  # BUY: Wave 4 must stay above Wave 1 (B)
+    symbol = trade.get("symbol")
+    open_time_str = trade.get("open_time")
+    if not symbol or not open_time_str:
+        return False
+
+    # Wave 4 non-overlap only becomes a meaningful invalidation AFTER price has
+    # actually confirmed Wave 3 by moving beyond Wave 1's extreme (B) at least
+    # once since entry. Checking this from the moment of entry — while price is
+    # still near Wave 2 (C), which sits between A and B by construction — would
+    # flag almost every fresh trade as "invalidated" on its very first tick;
+    # that's Wave 3 not having started yet, not a genuine overlap.
+    try:
+        import datetime as _dt
+        open_dt = _dt.datetime.strptime(open_time_str, "%Y-%m-%d %H:%M:%S")
+        candles = get_candles(symbol=symbol, timeframe=get_timeframe(DEFAULT_TIMEFRAME), count=200)
+        if candles is None or len(candles) == 0:
+            return False
+        since_entry = candles[candles['Time'] >= open_dt]
+        if len(since_entry) == 0:
+            return False
+    except Exception:
+        return False
+
+    if pos_type == 0:  # BUY
+        wave3_confirmed = max(since_entry['High'].max(), current_price) > wave1_price
+        if not wave3_confirmed:
+            return False
         return current_price < wave1_price
-    else:  # SELL: Wave 4 must stay below Wave 1 (B)
+    else:  # SELL
+        wave3_confirmed = min(since_entry['Low'].min(), current_price) < wave1_price
+        if not wave3_confirmed:
+            return False
         return current_price > wave1_price
 
 
@@ -425,6 +463,322 @@ def check_sma5_reversion_signal(df, current_price, threshold_pct=0.3, rsi_overbo
         return "HOLD", f"Deviation {deviation_pct:.2f}% below {threshold_pct}% threshold.", sma5
 
 
+def check_range_trading_signal(df, current_price, range_info, adx_period=14, adx_threshold=25.0,
+                                entry_zone_pct=0.15, rsi_overbought=65.0, rsi_oversold=35.0, atr_period=14):
+    """
+    Two entry modes for an already-detected consolidation range (detect_range_zone),
+    checked in this order:
+
+    1. Breakout: the last COMPLETED candle's close is beyond range_top (BUY) or
+       range_bottom (SELL) — same "close beyond the level" breakout-confirmation
+       convention the Gann loop already uses. No ADX/RSI gating here: a breakout
+       is the market starting to trend, so "not trending"/"exhausted" filters
+       would be self-contradictory.
+    2. Fade (only checked if no breakout): requires ADX < adx_threshold (still
+       ranging), live price within entry_zone_pct% of a boundary, and RSI(14)
+       confirms exhaustion (near bottom + oversold -> BUY, near top +
+       overbought -> SELL) — same RSI-gating convention as
+       check_sma5_reversion_signal.
+
+    Also computes ATR (simple rolling mean of True Range, same convention
+    already used in the Gann loop's volatility filter) as a noise buffer for
+    the SL.
+
+    Returns:
+        (decision, reason, context): context always includes range_top,
+        range_bottom, adx (None if NaN — NaN isn't valid JSON and this gets
+        stored in the trade's gann_data column), atr; "mode" ("breakout" or
+        "fade") is present only when decision != "HOLD".
+    """
+    import pandas as pd
+
+    range_top = range_info["range_top"]
+    range_bottom = range_info["range_bottom"]
+    range_width = range_top - range_bottom
+
+    min_bars_needed = max(2 * adx_period + 5, atr_period + 5)
+    if len(df) < min_bars_needed:
+        return "HOLD", f"Not enough candle data for ADX/ATR warmup ({len(df)} candles, minimum {min_bars_needed}).", None
+
+    # ATR: simple rolling mean of True Range — a noise buffer for the SL.
+    prev_close = df['Close'].shift(1)
+    tr = pd.concat([
+        df['High'] - df['Low'],
+        (df['High'] - prev_close).abs(),
+        (df['Low'] - prev_close).abs()
+    ], axis=1).max(axis=1)
+    atr_raw = tr.rolling(window=atr_period).mean().iloc[-2]  # last completed candle
+    atr = None if pd.isna(atr_raw) else float(atr_raw)
+
+    adx_series = calculate_adx(df, period=adx_period)
+    adx_raw = adx_series.iloc[-2]  # last completed candle
+    adx = None if pd.isna(adx_raw) else float(adx_raw)
+
+    base_context = {"range_top": range_top, "range_bottom": range_bottom, "adx": adx, "atr": atr}
+
+    last_close = df['Close'].iloc[-2]  # last completed candle
+
+    # 1. Breakout mode
+    if last_close > range_top:
+        return "BUY", (
+            f"Range Trading: last close {last_close:.5f} broke above range top {range_top:.5f} "
+            f"(range {range_bottom:.5f}-{range_top:.5f})."
+        ), {**base_context, "mode": "breakout"}
+    if last_close < range_bottom:
+        return "SELL", (
+            f"Range Trading: last close {last_close:.5f} broke below range bottom {range_bottom:.5f} "
+            f"(range {range_bottom:.5f}-{range_top:.5f})."
+        ), {**base_context, "mode": "breakout"}
+
+    # 2. Fade mode — requires a valid (non-warmup) ADX confirming the range is still intact
+    if adx is None:
+        return "HOLD", "ADX not yet available (warmup) — treating as HOLD rather than risking a bad fade entry.", base_context
+    if adx >= adx_threshold:
+        return "HOLD", f"ADX ({adx:.1f}) >= threshold ({adx_threshold}) — market trending, not a safe range to fade.", base_context
+    if range_width <= 0:
+        return "HOLD", "Range width is zero or negative — invalid range.", base_context
+
+    dist_from_bottom_pct = abs(current_price - range_bottom) / range_bottom * 100.0
+    dist_from_top_pct = abs(current_price - range_top) / range_top * 100.0
+
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rsi14 = (100 - (100 / (1 + gain / loss))).iloc[-2]
+
+    if dist_from_bottom_pct <= entry_zone_pct:
+        if pd.isna(rsi14) or rsi14 > rsi_oversold:
+            rsi_str = f"{rsi14:.1f}" if not pd.isna(rsi14) else "N/A"
+            return "HOLD", f"Price near range bottom but RSI14 ({rsi_str}) not oversold (<{rsi_oversold}) — momentum not exhausted.", base_context
+        return "BUY", (
+            f"Range Trading: price within {entry_zone_pct}% of range bottom ({range_bottom:.5f}), "
+            f"ADX {adx:.1f} confirms ranging, RSI14 {rsi14:.1f} confirms oversold."
+        ), {**base_context, "mode": "fade"}
+
+    if dist_from_top_pct <= entry_zone_pct:
+        if pd.isna(rsi14) or rsi14 < rsi_overbought:
+            rsi_str = f"{rsi14:.1f}" if not pd.isna(rsi14) else "N/A"
+            return "HOLD", f"Price near range top but RSI14 ({rsi_str}) not overbought (>{rsi_overbought}) — momentum not exhausted.", base_context
+        return "SELL", (
+            f"Range Trading: price within {entry_zone_pct}% of range top ({range_top:.5f}), "
+            f"ADX {adx:.1f} confirms ranging, RSI14 {rsi14:.1f} confirms overbought."
+        ), {**base_context, "mode": "fade"}
+
+    return "HOLD", (
+        f"Price mid-range ({dist_from_bottom_pct:.2f}% from bottom, {dist_from_top_pct:.2f}% from top) — "
+        f"no breakout, not near a boundary for fade."
+    ), base_context
+
+
+def check_range_trading_invalidation(symbol, ticket, mode, range_top, range_bottom, adx_exit_threshold, adx_period=14):
+    """
+    Post-entry invalidation check for a Range Trading position, cached per
+    completed candle — ADX/price only change on a new bar, so recomputing on
+    every ~30s management tick is pure waste (same idiom as the AI M5-exit
+    cache: last_exit_check_candle/last_exit_check_result above, keyed here
+    per-ticket instead of per-symbol since a symbol could in principle hold
+    both a fade and a breakout Range position at once).
+
+    Fade-mode: if ADX has risen above adx_exit_threshold (higher than the
+    entry adx_threshold), the "market is still ranging" premise behind the
+    fade is now false — invalidate. Gated to fade-mode positions only: a
+    rising ADX during a breakout trade is confirmation, not invalidation.
+    Breakout-mode: if a completed candle closes back INSIDE the range, the
+    breakout failed — invalidate immediately rather than waiting for the far
+    (opposite-side) SL.
+
+    Returns True if the position should be closed now.
+    """
+    import pandas as pd
+    global last_range_check_candle, last_range_check_result
+
+    df = get_candles(symbol=symbol, timeframe=get_timeframe(DEFAULT_TIMEFRAME), count=max(adx_period * 3, 50))
+    if df is None or len(df) < 20:
+        return False
+    df = df.reset_index(drop=True)
+
+    current_candle_time = str(df['Time'].iloc[-1])
+    cache_key = f"{ticket}_{mode}"
+    if last_range_check_candle.get(cache_key) == current_candle_time:
+        return last_range_check_result.get(cache_key, False)
+
+    invalidated = False
+    if mode == "fade":
+        adx_raw = calculate_adx(df, period=adx_period).iloc[-2]
+        if not pd.isna(adx_raw) and float(adx_raw) > adx_exit_threshold:
+            invalidated = True
+    elif mode == "breakout":
+        last_close = df['Close'].iloc[-2]
+        if range_bottom < last_close < range_top:
+            invalidated = True
+
+    last_range_check_candle[cache_key] = current_candle_time
+    last_range_check_result[cache_key] = invalidated
+    return invalidated
+
+
+def check_harmonic_pattern_signal(df, current_price, pattern_info, entry_zone_pct=0.15,
+                                   rsi_overbought=65.0, rsi_oversold=35.0, atr_period=14):
+    """
+    Given an already-detected X-A-B-C-D harmonic pattern (detect_harmonic_pattern),
+    checks whether the current live price has reached the projected PRZ
+    (Potential Reversal Zone) and confirms exhaustion via RSI(14) — the
+    "D-completion + RSI confirmation" convention decided for this strategy,
+    matching check_sma5_reversion_signal / Range Trading's fade-mode gating.
+
+    Also computes ATR (same simple rolling True Range convention already
+    used by Range Trading) as the SL noise buffer beyond point X.
+
+    Returns:
+        (decision, reason, context): context includes pattern, X, A, B, C,
+        prz_price, atr (None if NaN — NaN isn't valid JSON and this gets
+        stored in the trade's gann_data column).
+    """
+    import pandas as pd
+
+    prz_price = pattern_info["prz_price"]
+    pattern_type = pattern_info["type"]  # "BUY" or "SELL"
+    pattern_name = pattern_info["pattern"]
+
+    min_bars_needed = atr_period + 5
+    if len(df) < min_bars_needed:
+        return "HOLD", f"Not enough candle data for ATR warmup ({len(df)} candles, minimum {min_bars_needed}).", None
+
+    prev_close = df['Close'].shift(1)
+    tr = pd.concat([
+        df['High'] - df['Low'],
+        (df['High'] - prev_close).abs(),
+        (df['Low'] - prev_close).abs()
+    ], axis=1).max(axis=1)
+    atr_raw = tr.rolling(window=atr_period).mean().iloc[-2]  # last completed candle
+    atr = None if pd.isna(atr_raw) else float(atr_raw)
+
+    base_context = {
+        "pattern": pattern_name, "X": pattern_info["X"], "A": pattern_info["A"],
+        "B": pattern_info["B"], "C": pattern_info["C"], "prz_price": prz_price, "atr": atr
+    }
+
+    # Entry trigger: current live price has reached the PRZ — D is completing right now.
+    if prz_price == 0:
+        return "HOLD", "PRZ price is zero — invalid projection.", base_context
+    dist_from_prz_pct = abs(current_price - prz_price) / prz_price * 100.0
+    if dist_from_prz_pct > entry_zone_pct:
+        return "HOLD", f"Price not yet within {entry_zone_pct}% of the {pattern_name} PRZ ({prz_price:.5f}) — D hasn't completed yet.", base_context
+
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rsi14 = (100 - (100 / (1 + gain / loss))).iloc[-2]  # last completed candle
+
+    if pd.isna(rsi14):
+        return "HOLD", "RSI14 not yet available (warmup).", base_context
+
+    if pattern_type == "BUY":
+        if rsi14 > rsi_oversold:
+            return "HOLD", f"Price at {pattern_name} PRZ but RSI14 ({rsi14:.1f}) not oversold (<{rsi_oversold}) — momentum not exhausted.", base_context
+        return "BUY", (
+            f"Harmonic {pattern_name}: D completing at PRZ {prz_price:.5f} "
+            f"(X={pattern_info['X']:.5f}, A={pattern_info['A']:.5f}, B={pattern_info['B']:.5f}, C={pattern_info['C']:.5f}), "
+            f"RSI14 {rsi14:.1f} confirms oversold."
+        ), base_context
+    else:
+        if rsi14 < rsi_overbought:
+            return "HOLD", f"Price at {pattern_name} PRZ but RSI14 ({rsi14:.1f}) not overbought (>{rsi_overbought}) — momentum not exhausted.", base_context
+        return "SELL", (
+            f"Harmonic {pattern_name}: D completing at PRZ {prz_price:.5f} "
+            f"(X={pattern_info['X']:.5f}, A={pattern_info['A']:.5f}, B={pattern_info['B']:.5f}, C={pattern_info['C']:.5f}), "
+            f"RSI14 {rsi14:.1f} confirms overbought."
+        ), base_context
+
+
+def check_classical_pattern_signal(df, pattern_info, atr_period=14):
+    """
+    Given an already-detected classical chart pattern — continuation
+    (detect_continuation_pattern: Rectangle/Triangle-variants/Wedge-variants/
+    Pennant/Flag) or reversal (detect_reversal_pattern: Head & Shoulders +
+    inverse, Double Top/Bottom) — checks whether the last completed candle's
+    close has broken beyond the pattern's defining level (breakout_level for
+    continuation, neckline_level for reversal) — the same "close beyond the
+    level" breakout-confirmation convention the Gann loop already uses. No
+    RSI gate: a breakout is the market starting to move, so an exhaustion
+    filter would be self-contradictory (same principle as Gann/Range
+    Trading's breakout mode).
+
+    Also computes ATR (same convention as Range Trading/Harmonic Patterns)
+    as the SL noise buffer.
+
+    Returns:
+        (decision, reason, context): context includes pattern, type, level
+        (the breakout/neckline price), atr (None if NaN).
+    """
+    import pandas as pd
+
+    pattern_name = pattern_info["pattern"]
+    pattern_type = pattern_info["type"]
+    is_continuation = "breakout_level" in pattern_info
+    level = pattern_info["breakout_level"] if is_continuation else pattern_info["neckline_level"]
+    level_label = "breakout level" if is_continuation else "neckline"
+
+    min_bars_needed = atr_period + 5
+    if len(df) < min_bars_needed:
+        return "HOLD", f"Not enough candle data for ATR warmup ({len(df)} candles, minimum {min_bars_needed}).", None
+
+    prev_close = df['Close'].shift(1)
+    tr = pd.concat([
+        df['High'] - df['Low'],
+        (df['High'] - prev_close).abs(),
+        (df['Low'] - prev_close).abs()
+    ], axis=1).max(axis=1)
+    atr_raw = tr.rolling(window=atr_period).mean().iloc[-2]  # last completed candle
+    atr = None if pd.isna(atr_raw) else float(atr_raw)
+
+    base_context = {"pattern": pattern_name, "type": pattern_type, "level": level, "atr": atr}
+
+    last_close = df['Close'].iloc[-2]  # last completed candle
+
+    if pattern_type == "BUY" and last_close > level:
+        return "BUY", f"Classical {pattern_name}: last close {last_close:.5f} broke above the {level_label} {level:.5f}.", base_context
+    if pattern_type == "SELL" and last_close < level:
+        return "SELL", f"Classical {pattern_name}: last close {last_close:.5f} broke below the {level_label} {level:.5f}.", base_context
+    return "HOLD", f"Price has not yet broken the {pattern_name} {level_label} ({level:.5f}).", base_context
+
+
+def check_classical_pattern_invalidation(symbol, ticket, pos_type, level):
+    """
+    Post-entry invalidation check for a Classical Patterns position, cached
+    per completed candle — same idiom as check_range_trading_invalidation
+    (level/price only changes on a new bar, so recomputing every ~30s
+    management tick is pure waste).
+
+    If a completed candle closes back on the wrong side of the breakout/
+    neckline level, the breakout failed — invalidate now rather than wait
+    for the far SL (the opposite trendline or the pattern's head/peak, which
+    sits much further away than this level).
+
+    Returns True if the position should be closed now.
+    """
+    global last_classical_check_candle, last_classical_check_result
+
+    df = get_candles(symbol=symbol, timeframe=get_timeframe(DEFAULT_TIMEFRAME), count=20)
+    if df is None or len(df) < 3:
+        return False
+
+    current_candle_time = str(df['Time'].iloc[-1])
+    cache_key = f"{ticket}"
+    if last_classical_check_candle.get(cache_key) == current_candle_time:
+        return last_classical_check_result.get(cache_key, False)
+
+    last_close = df['Close'].iloc[-2]
+    if pos_type == "BUY":
+        invalidated = last_close < level
+    else:
+        invalidated = last_close > level
+
+    last_classical_check_candle[cache_key] = current_candle_time
+    last_classical_check_result[cache_key] = invalidated
+    return invalidated
+
+
 def sync_db_with_mt5_positions():
     """
     Sync open positions from MT5 to SQLite database.
@@ -598,12 +952,15 @@ def manage_active_positions_grid():
         print(f"[PROTECTION INFO] Symbol {symbol} has {len(pos_list)} active trades. Current profit/drawdown pips from last trade: {-drawdown_pips:.1f} pips.")
 
         # Check if we need to open the next leg (ONLY if Grid is explicitly enabled, and not a
-        # Gann, SMA5-reversion, or Elliott Wave trade — all three manage their own SL/TP and
-        # shouldn't get martingale legs)
+        # Gann, SMA5-reversion, Elliott Wave, Range Trading, Harmonic Patterns, or Classical
+        # Patterns trade — all six manage their own SL/TP and shouldn't get martingale legs)
         is_gann_trade = any("gann" in (pos.comment or "").lower() for pos in pos_list)
         is_sma5_trade = any("sma5" in (pos.comment or "").lower() for pos in pos_list)
         is_elliott_trade = any("elliott" in (pos.comment or "").lower() for pos in pos_list)
-        if grid_enabled and not is_gann_trade and not is_sma5_trade and not is_elliott_trade and drawdown_pips >= grid_step:
+        is_range_trade = any("range" in (pos.comment or "").lower() for pos in pos_list)
+        is_harmonic_trade = any("harmonic" in (pos.comment or "").lower() for pos in pos_list)
+        is_classical_trade = any("classical" in (pos.comment or "").lower() for pos in pos_list)
+        if grid_enabled and not is_gann_trade and not is_sma5_trade and not is_elliott_trade and not is_range_trade and not is_harmonic_trade and not is_classical_trade and drawdown_pips >= grid_step:
             if len(pos_list) < max_legs:
                 print(f"[GRID TRIGGER] Drawdown ({drawdown_pips:.1f} pips) >= Grid Step ({grid_step} pips). Opening next leg!")
                 
@@ -650,8 +1007,11 @@ def manage_active_positions_grid():
             is_gann_trade = any("gann" in (pos.comment or "").lower() for pos in pos_list)
             is_sma5_trade = any("sma5" in (pos.comment or "").lower() for pos in pos_list)
             is_elliott_trade = any("elliott" in (pos.comment or "").lower() for pos in pos_list)
-            preserve_original_tp_sl = is_gann_trade or is_sma5_trade or is_elliott_trade
-            strategy_label = "Gann" if is_gann_trade else ("SMA5 reversion" if is_sma5_trade else "Elliott Wave")
+            is_range_trade = any("range" in (pos.comment or "").lower() for pos in pos_list)
+            is_harmonic_trade = any("harmonic" in (pos.comment or "").lower() for pos in pos_list)
+            is_classical_trade = any("classical" in (pos.comment or "").lower() for pos in pos_list)
+            preserve_original_tp_sl = is_gann_trade or is_sma5_trade or is_elliott_trade or is_range_trade or is_harmonic_trade or is_classical_trade
+            strategy_label = "Gann" if is_gann_trade else ("SMA5 reversion" if is_sma5_trade else ("Elliott Wave" if is_elliott_trade else ("Range Trading" if is_range_trade else ("Harmonic Patterns" if is_harmonic_trade else "Classical Patterns"))))
 
             if preserve_original_tp_sl and pos_list[0].tp > 0:
                 tp_price = pos_list[0].tp
@@ -703,7 +1063,77 @@ def manage_active_positions_grid():
                             any_closed = True
                 if any_closed:
                     continue
-                
+
+            # 2.6 Range Trading invalidation checks: fade-mode ADX regime-break
+            # (market started trending, the "still ranging" premise behind the
+            # fade is now false) and breakout-mode failed-breakout (a completed
+            # candle closed back inside the range). Both are cached per
+            # completed candle inside check_range_trading_invalidation.
+            if is_range_trade:
+                import json
+                from db_manager import get_trade_by_ticket
+
+                any_closed = False
+                range_adx_period = int(settings.get("range_trading_adx_period", 14))
+                range_adx_exit_threshold = float(settings.get("range_trading_adx_exit_threshold", 30.0))
+                for pos in pos_list:
+                    if "range" not in (pos.comment or "").lower():
+                        continue
+                    trade_row = get_trade_by_ticket(pos.ticket)
+                    if not trade_row or not trade_row.get("gann_data"):
+                        continue
+                    try:
+                        range_context = json.loads(trade_row["gann_data"])
+                    except Exception:
+                        continue
+                    pos_mode = range_context.get("mode")
+                    pos_range_top = range_context.get("range_top")
+                    pos_range_bottom = range_context.get("range_bottom")
+                    if pos_mode is None or pos_range_top is None or pos_range_bottom is None:
+                        continue
+                    if check_range_trading_invalidation(symbol, pos.ticket, pos_mode, pos_range_top, pos_range_bottom,
+                                                         range_adx_exit_threshold, adx_period=range_adx_period):
+                        reason_label = "ADX regime-break (no longer ranging)" if pos_mode == "fade" else "Failed breakout (closed back inside range)"
+                        print(f"[RANGE INVALIDATION] {reason_label} on {symbol} (ticket #{pos.ticket}). Closing.")
+                        close_res = close_position(ticket=pos.ticket, comment="Range Trading Invalidation")
+                        if close_res:
+                            log_trade_close(pos.ticket, current_price, pos.profit, exit_reason=f"Range Trading invalidation: {reason_label}")
+                            any_closed = True
+                if any_closed:
+                    continue
+
+            # 2.7 Classical Patterns invalidation check: if a completed candle
+            # closes back on the wrong side of the breakout/neckline level, the
+            # breakout failed — close now rather than wait for the far SL (the
+            # opposite trendline or the pattern's head/peak).
+            if is_classical_trade:
+                import json
+                from db_manager import get_trade_by_ticket
+
+                any_closed = False
+                for pos in pos_list:
+                    if "classical" not in (pos.comment or "").lower():
+                        continue
+                    trade_row = get_trade_by_ticket(pos.ticket)
+                    if not trade_row or not trade_row.get("gann_data"):
+                        continue
+                    try:
+                        classical_context = json.loads(trade_row["gann_data"])
+                    except Exception:
+                        continue
+                    pos_type = classical_context.get("type")
+                    pos_level = classical_context.get("level")
+                    if pos_type is None or pos_level is None:
+                        continue
+                    if check_classical_pattern_invalidation(symbol, pos.ticket, pos_type, pos_level):
+                        print(f"[CLASSICAL INVALIDATION] Failed breakout on {symbol} (ticket #{pos.ticket}). Closing.")
+                        close_res = close_position(ticket=pos.ticket, comment="Classical Pattern Invalidation")
+                        if close_res:
+                            log_trade_close(pos.ticket, current_price, pos.profit, exit_reason="Classical pattern failed breakout invalidation")
+                            any_closed = True
+                if any_closed:
+                    continue
+
             # 3. Check M5 Swing Exit
             if check_m5_exit_signal(symbol, 0 if basket_type == 'BUY' else 1):
                 # Call AI to verify the exit signal, but only once per M5 candle to avoid
@@ -1124,6 +1554,722 @@ def manage_elliott_wave_strategy(settings, active_news_events, risk_percent, aut
                 print(f"[ELLIOTT WAVE] [ERROR] Failed to execute trade order for {symbol}.")
         except Exception as elliott_ex:
             print(f"[ELLIOTT WAVE] [ERROR] {symbol}: {elliott_ex}")
+
+
+def manage_range_trading_strategy(settings, active_news_events, risk_percent, auto_trade_enabled):
+    """
+    Independent, parallel strategy: detects a horizontal consolidation range
+    from confirmed swing-pivot boundaries (detect_range_zone — not a rolling
+    min/max), then either fades the boundaries while ADX confirms the market
+    is still ranging, or trades a confirmed breakout of either boundary.
+    Structured exactly like the other three strategies — its own symbol
+    list, its own signal source, its own SL/TP/lot-size pipeline, so none of
+    the four strategies' `continue`s or state can interfere with each other.
+
+    Left disabled by default (range_trading_enabled defaults to "0") — this
+    is a new, unvalidated strategy on a live account; see backtest_range_trading.py.
+    """
+    if int(settings.get("range_trading_enabled", 0)) != 1:
+        return
+
+    range_symbols = settings.get("range_trading_symbols", [])
+    lookback = int(settings.get("range_trading_lookback", 100))
+    swing_window = int(settings.get("range_trading_swing_window", 5))
+    peak_tolerance_pct = float(settings.get("range_trading_peak_tolerance_pct", 0.15))
+    trough_tolerance_pct = float(settings.get("range_trading_trough_tolerance_pct", 0.15))
+    adx_period = int(settings.get("range_trading_adx_period", 14))
+    adx_threshold = float(settings.get("range_trading_adx_threshold", 25.0))
+    entry_zone_pct = float(settings.get("range_trading_entry_zone_pct", 0.15))
+    min_range_pct = float(settings.get("range_trading_min_range_pct", 0.3))
+    max_range_pct = float(settings.get("range_trading_max_range_pct", 3.0))
+    atr_period = int(settings.get("range_trading_atr_period", 14))
+    atr_sl_multiplier = float(settings.get("range_trading_atr_sl_multiplier", 1.0))
+    tp_buffer_pct = float(settings.get("range_trading_tp_buffer_pct", 10.0))
+    breakout_tp_multiplier = float(settings.get("range_trading_breakout_tp_multiplier", 1.0))
+    rsi_overbought = float(settings.get("range_trading_rsi_overbought", 65.0))
+    rsi_oversold = float(settings.get("range_trading_rsi_oversold", 35.0))
+    min_rr_ratio = float(settings.get("range_trading_min_rr_ratio", 1.0))
+    min_tp_spread_multiple = float(settings.get("range_trading_min_tp_spread_multiple", 2.0))
+
+    for symbol in range_symbols:
+        try:
+            # News freeze check (reuses the same events computed once per cycle)
+            if any(event["currency"].upper() in symbol.upper() for event in active_news_events):
+                continue
+
+            candles_df = get_candles(symbol=symbol, timeframe=get_timeframe(DEFAULT_TIMEFRAME), count=lookback + 100)
+            if candles_df is None or len(candles_df) < 20:
+                continue
+            candles_df = candles_df.reset_index(drop=True)
+
+            range_info = detect_range_zone(
+                candles_df, lookback=lookback, window=swing_window,
+                peak_tolerance_pct=peak_tolerance_pct, trough_tolerance_pct=trough_tolerance_pct,
+                min_range_pct=min_range_pct, max_range_pct=max_range_pct
+            )
+            if not range_info:
+                continue
+
+            price_info = get_current_price(symbol)
+            if not price_info:
+                continue
+            mid_price = (price_info['bid'] + price_info['ask']) / 2.0
+
+            decision, reason, context = check_range_trading_signal(
+                candles_df, mid_price, range_info,
+                adx_period=adx_period, adx_threshold=adx_threshold, entry_zone_pct=entry_zone_pct,
+                rsi_overbought=rsi_overbought, rsi_oversold=rsi_oversold, atr_period=atr_period
+            )
+            if decision == "HOLD":
+                continue
+
+            mode = context["mode"]
+            mode_tag = "BO" if mode == "breakout" else "Fade"
+
+            # Duplicate same-direction entry guard
+            symbol_positions = [
+                pos for pos in get_open_positions()
+                if pos.magic == MAGIC_NUMBER and pos.symbol == symbol and "range" in (pos.comment or "").lower()
+            ]
+            pos_type_str_map = {0: "BUY", 1: "SELL"}
+            if any(pos_type_str_map.get(pos.type) == decision for pos in symbol_positions):
+                continue
+
+            # Stop-loss cooldown reuse (no Gann-specific setup context here)
+            if is_setup_stopped_out(symbol, None, decision):
+                continue
+
+            symbol_info = mt5.symbol_info(symbol)
+            if not symbol_info:
+                continue
+
+            entry_price = price_info['ask'] if decision == "BUY" else price_info['bid']
+            range_top = context["range_top"]
+            range_bottom = context["range_bottom"]
+            range_width = range_top - range_bottom
+            atr = context.get("atr") or 0.0
+
+            # SL is unified by direction regardless of mode — a breakout BUY's
+            # SL sits at the far/opposite side of the range (deliberately wide),
+            # the exact same level a fade BUY near that boundary would use anyway.
+            if decision == "BUY":
+                sl = range_bottom - atr * atr_sl_multiplier
+            else:
+                sl = range_top + atr * atr_sl_multiplier
+
+            # TP is mode-dependent: fade targets the opposite boundary pulled in
+            # by a fill-probability buffer (MT5 fills at bid/ask, not the
+            # mid-price the range was computed from); breakout targets a
+            # measured-move projection of the range width.
+            if mode == "fade":
+                if decision == "BUY":
+                    tp = range_top - range_width * (tp_buffer_pct / 100.0)
+                else:
+                    tp = range_bottom + range_width * (tp_buffer_pct / 100.0)
+            else:
+                if decision == "BUY":
+                    tp = range_top + range_width * breakout_tp_multiplier
+                else:
+                    tp = range_bottom - range_width * breakout_tp_multiplier
+
+            sl = round(sl, symbol_info.digits)
+            tp = round(tp, symbol_info.digits)
+
+            # TP must actually sit on the profitable side of entry — a breakout
+            # entry can occur well beyond range_top/range_bottom on a strong move,
+            # so a measured-move TP computed purely from the boundary can land
+            # behind entry (abs(tp-entry) would still look like a positive R:R).
+            if decision == "BUY" and tp <= entry_price:
+                print(f"[RANGE TRADING] {symbol} rejected: TP ({tp}) is not ahead of entry ({entry_price}) for a BUY.")
+                continue
+            if decision == "SELL" and tp >= entry_price:
+                print(f"[RANGE TRADING] {symbol} rejected: TP ({tp}) is not ahead of entry ({entry_price}) for a SELL.")
+                continue
+
+            sl_dist = abs(entry_price - sl)
+            tp_dist = abs(tp - entry_price)
+            if sl_dist <= 0:
+                print(f"[RANGE TRADING] {symbol} rejected: Stop Loss at or ahead of entry price.")
+                continue
+
+            # Spread guard: same rationale as SMA5 — MT5 closes a BUY at Bid and
+            # a SELL at Ask, not the mid-price the range/TP levels were computed from.
+            spread = price_info['ask'] - price_info['bid']
+            if tp_dist < spread * min_tp_spread_multiple:
+                print(f"[RANGE TRADING] {symbol} rejected: TP distance ({tp_dist:.5f}) too small relative to spread ({spread:.5f}).")
+                continue
+
+            rr_ratio = tp_dist / sl_dist
+            if rr_ratio < min_rr_ratio:
+                print(f"[RANGE TRADING] {symbol} rejected: R:R 1:{rr_ratio:.2f} below strategy floor 1:{min_rr_ratio:.2f}.")
+                continue
+
+            volume = calculate_lot_size(symbol, sl, entry_price, risk_percent=risk_percent)
+            reason_msg = f"Range Trading ({mode.capitalize()}): {reason}"
+            range_context = {
+                "type": decision, "mode": mode,
+                "range_top": range_top, "range_bottom": range_bottom,
+                "adx": context.get("adx")
+            }
+
+            if not auto_trade_enabled:
+                print(f"[RANGE TRADING] Signal-Only Mode: {decision} on {symbol} at {entry_price} (SL: {sl}, TP: {tp}). Not executed.")
+                last_scan_reports[f"{symbol}_range"] = {
+                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                    "status": "Signal Only (Range)",
+                    "details": reason_msg,
+                    "structure": range_context
+                }
+                continue
+
+            trade_res = open_trade(
+                action=decision,
+                symbol=symbol,
+                volume=volume,
+                sl=sl,
+                tp=tp,
+                magic=MAGIC_NUMBER,
+                comment=f"Range {mode_tag} {decision}"[:28]
+            )
+
+            if trade_res and trade_res["success"]:
+                log_trade_open(
+                    ticket=trade_res["ticket"],
+                    symbol=symbol,
+                    action=decision,
+                    volume=volume,
+                    entry_price=trade_res["price"],
+                    sl=sl,
+                    tp=tp,
+                    reason=reason_msg,
+                    gann_data=range_context
+                )
+                print(f"[RANGE TRADING] Executed {decision} {volume} lots on {symbol} at {trade_res['price']} (SL: {sl}, TP: {tp}). Ticket: {trade_res['ticket']}.")
+                last_scan_reports[f"{symbol}_range"] = {
+                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                    "status": f"Executed {decision} (Range {mode_tag})",
+                    "details": reason_msg,
+                    "structure": range_context
+                }
+
+                entry_time_str = time.strftime('%Y-%m-%d %H:%M:%S')
+                screenshot_url = None
+                try:
+                    from chart_generator import generate_chart_screenshot
+                    from db_manager import update_trade_screenshot
+
+                    screenshot_url = generate_chart_screenshot(
+                        symbol=symbol,
+                        ticket=trade_res["ticket"],
+                        entry_price=trade_res["price"],
+                        sl_price=sl,
+                        tp_price=tp,
+                        timeframe_str=DEFAULT_TIMEFRAME,
+                        entry_time_str=entry_time_str
+                    )
+                    update_trade_screenshot(trade_res["ticket"], screenshot_url)
+                    print(f"[SCREENSHOT] Saved Range Trading chart to {screenshot_url}")
+                except Exception as ex:
+                    print(f"[SCREENSHOT] [ERROR] Failed to save Range Trading screenshot: {ex}")
+
+                try:
+                    from telegram_notifier import notify_trade_open
+                    from db_manager import update_trade_telegram_msg_id
+                    msg_id = notify_trade_open(
+                        ticket=trade_res["ticket"],
+                        symbol=symbol,
+                        action=decision,
+                        volume=volume,
+                        entry_price=trade_res["price"],
+                        sl=sl,
+                        tp=tp,
+                        reason=reason_msg,
+                        screenshot_url=screenshot_url
+                    )
+                    if msg_id:
+                        update_trade_telegram_msg_id(trade_res["ticket"], msg_id)
+                        print(f"[TELEGRAM] Range Trading trade open notification sent (Msg ID: {msg_id})")
+                except Exception as tg_ex:
+                    print(f"[TELEGRAM] [ERROR] Failed to send Range Trading open alert: {tg_ex}")
+            else:
+                print(f"[RANGE TRADING] [ERROR] Failed to execute trade order for {symbol}.")
+        except Exception as range_ex:
+            print(f"[RANGE TRADING] [ERROR] {symbol}: {range_ex}")
+
+
+def manage_harmonic_patterns_strategy(settings, active_news_events, risk_percent, auto_trade_enabled):
+    """
+    Independent, parallel strategy: detects classical harmonic X-A-B-C-D
+    price structures (Gartley/Bat/Butterfly/Crab, via Fibonacci ratio
+    confluence — detect_harmonic_pattern) and enters as price completes the
+    projected D point (the "Potential Reversal Zone"), confirmed by RSI(14)
+    exhaustion. Structured exactly like the other four strategies — its own
+    symbol list, its own signal source, its own SL/TP/lot-size pipeline.
+
+    SL sits beyond point X — the standard harmonic invalidation level — and
+    (unlike Elliott Wave) needs no separate post-entry invalidation check:
+    entry happens near D, which sits on the opposite side of the whole
+    pattern from X, so "price beyond X" cannot be true at the moment of
+    entry, and the SL alone already captures the real invalidation rule.
+
+    Left disabled by default (harmonic_patterns_enabled defaults to "0") —
+    this is a new, unvalidated strategy on a live account; see
+    backtest_harmonic_patterns.py.
+    """
+    if int(settings.get("harmonic_patterns_enabled", 0)) != 1:
+        return
+
+    harmonic_symbols = settings.get("harmonic_patterns_symbols", [])
+    lookback = int(settings.get("harmonic_patterns_lookback", 100))
+    swing_window = int(settings.get("harmonic_patterns_swing_window", 5))
+    pattern_types = settings.get("harmonic_patterns_types", list(HARMONIC_PATTERNS.keys()))
+    ratio_tolerance_pct = float(settings.get("harmonic_patterns_ratio_tolerance_pct", 5.0))
+    prz_confluence_pct = float(settings.get("harmonic_patterns_prz_confluence_pct", 10.0))
+    entry_zone_pct = float(settings.get("harmonic_patterns_entry_zone_pct", 0.15))
+    atr_period = int(settings.get("harmonic_patterns_atr_period", 14))
+    atr_sl_multiplier = float(settings.get("harmonic_patterns_atr_sl_multiplier", 1.0))
+    tp_retracement_ratio = float(settings.get("harmonic_patterns_tp_retracement_ratio", 0.618))
+    rsi_overbought = float(settings.get("harmonic_patterns_rsi_overbought", 65.0))
+    rsi_oversold = float(settings.get("harmonic_patterns_rsi_oversold", 35.0))
+    min_rr_ratio = float(settings.get("harmonic_patterns_min_rr_ratio", 1.0))
+    min_tp_spread_multiple = float(settings.get("harmonic_patterns_min_tp_spread_multiple", 2.0))
+
+    for symbol in harmonic_symbols:
+        try:
+            if any(event["currency"].upper() in symbol.upper() for event in active_news_events):
+                continue
+
+            candles_df = get_candles(symbol=symbol, timeframe=get_timeframe(DEFAULT_TIMEFRAME), count=lookback + 100)
+            if candles_df is None or len(candles_df) < 20:
+                continue
+            candles_df = candles_df.reset_index(drop=True)
+
+            pattern_info = detect_harmonic_pattern(
+                candles_df, lookback=lookback, window=swing_window, patterns=pattern_types,
+                ratio_tolerance_pct=ratio_tolerance_pct, prz_confluence_pct=prz_confluence_pct
+            )
+            if not pattern_info:
+                continue
+
+            # Freshness: C must have completed recently, not ancient history
+            # (same convention as Elliott Wave's idx_C freshness gate, given a
+            # slightly longer leash since D can take a bit longer to complete)
+            last_idx = len(candles_df) - 1
+            if last_idx - pattern_info["idx_C"] > 10:
+                continue
+
+            price_info = get_current_price(symbol)
+            if not price_info:
+                continue
+            mid_price = (price_info['bid'] + price_info['ask']) / 2.0
+
+            decision, reason, context = check_harmonic_pattern_signal(
+                candles_df, mid_price, pattern_info,
+                entry_zone_pct=entry_zone_pct, rsi_overbought=rsi_overbought,
+                rsi_oversold=rsi_oversold, atr_period=atr_period
+            )
+            if decision == "HOLD":
+                continue
+
+            pattern_name = context["pattern"]
+
+            # Duplicate same-direction entry guard
+            symbol_positions = [
+                pos for pos in get_open_positions()
+                if pos.magic == MAGIC_NUMBER and pos.symbol == symbol and "harmonic" in (pos.comment or "").lower()
+            ]
+            pos_type_str_map = {0: "BUY", 1: "SELL"}
+            if any(pos_type_str_map.get(pos.type) == decision for pos in symbol_positions):
+                continue
+
+            # Stop-loss cooldown reuse (no Gann-specific setup context here)
+            if is_setup_stopped_out(symbol, None, decision):
+                continue
+
+            symbol_info = mt5.symbol_info(symbol)
+            if not symbol_info:
+                continue
+
+            entry_price = price_info['ask'] if decision == "BUY" else price_info['bid']
+            point_X = context["X"]
+            point_C = context["C"]
+            prz_price = context["prz_price"]
+            atr = context.get("atr") or 0.0
+
+            # SL sits beyond X — the standard harmonic invalidation level, ATR-buffered
+            if decision == "BUY":
+                sl = point_X - atr * atr_sl_multiplier
+            else:
+                sl = point_X + atr * atr_sl_multiplier
+
+            # TP: a single Fibonacci retracement of the C->D leg back toward C
+            # (harmonic trading often ladders 3 partial targets; this bot has
+            # no partial-close infrastructure anywhere, so — like every other
+            # strategy here — this uses one single TP)
+            if decision == "BUY":
+                tp = prz_price + tp_retracement_ratio * (point_C - prz_price)
+            else:
+                tp = prz_price - tp_retracement_ratio * (prz_price - point_C)
+
+            sl = round(sl, symbol_info.digits)
+            tp = round(tp, symbol_info.digits)
+
+            # TP must actually sit on the profitable side of entry (defense in
+            # depth — same class of bug found and fixed in Range Trading/Classical
+            # Patterns; lower risk here since entry is anchored close to the PRZ,
+            # but cheap to guard against regardless).
+            if decision == "BUY" and tp <= entry_price:
+                print(f"[HARMONIC] {symbol} rejected: TP ({tp}) is not ahead of entry ({entry_price}) for a BUY.")
+                continue
+            if decision == "SELL" and tp >= entry_price:
+                print(f"[HARMONIC] {symbol} rejected: TP ({tp}) is not ahead of entry ({entry_price}) for a SELL.")
+                continue
+
+            sl_dist = abs(entry_price - sl)
+            tp_dist = abs(tp - entry_price)
+            if sl_dist <= 0:
+                print(f"[HARMONIC] {symbol} rejected: Stop Loss at or ahead of entry price.")
+                continue
+
+            # Spread guard: same rationale as SMA5/Range Trading — MT5 closes a
+            # BUY at Bid and a SELL at Ask, not the mid-price the PRZ/TP were computed from.
+            spread = price_info['ask'] - price_info['bid']
+            if tp_dist < spread * min_tp_spread_multiple:
+                print(f"[HARMONIC] {symbol} rejected: TP distance ({tp_dist:.5f}) too small relative to spread ({spread:.5f}).")
+                continue
+
+            rr_ratio = tp_dist / sl_dist
+            if rr_ratio < min_rr_ratio:
+                print(f"[HARMONIC] {symbol} rejected: R:R 1:{rr_ratio:.2f} below strategy floor 1:{min_rr_ratio:.2f}.")
+                continue
+
+            volume = calculate_lot_size(symbol, sl, entry_price, risk_percent=risk_percent)
+            reason_msg = f"Harmonic {pattern_name}: {reason}"
+            harmonic_context = {
+                "type": decision, "pattern": pattern_name,
+                "X": point_X, "A": context["A"], "B": context["B"], "C": point_C,
+                "prz_price": prz_price
+            }
+
+            if not auto_trade_enabled:
+                print(f"[HARMONIC] Signal-Only Mode: {decision} on {symbol} at {entry_price} (SL: {sl}, TP: {tp}). Not executed.")
+                last_scan_reports[f"{symbol}_harmonic"] = {
+                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                    "status": "Signal Only (Harmonic)",
+                    "details": reason_msg,
+                    "structure": harmonic_context
+                }
+                continue
+
+            trade_res = open_trade(
+                action=decision,
+                symbol=symbol,
+                volume=volume,
+                sl=sl,
+                tp=tp,
+                magic=MAGIC_NUMBER,
+                comment=f"Harmonic {pattern_name} {decision}"[:28]
+            )
+
+            if trade_res and trade_res["success"]:
+                log_trade_open(
+                    ticket=trade_res["ticket"],
+                    symbol=symbol,
+                    action=decision,
+                    volume=volume,
+                    entry_price=trade_res["price"],
+                    sl=sl,
+                    tp=tp,
+                    reason=reason_msg,
+                    gann_data=harmonic_context
+                )
+                print(f"[HARMONIC] Executed {decision} {volume} lots on {symbol} at {trade_res['price']} (SL: {sl}, TP: {tp}). Ticket: {trade_res['ticket']}.")
+                last_scan_reports[f"{symbol}_harmonic"] = {
+                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                    "status": f"Executed {decision} (Harmonic {pattern_name})",
+                    "details": reason_msg,
+                    "structure": harmonic_context
+                }
+
+                entry_time_str = time.strftime('%Y-%m-%d %H:%M:%S')
+                screenshot_url = None
+                try:
+                    from chart_generator import generate_chart_screenshot
+                    from db_manager import update_trade_screenshot
+
+                    screenshot_url = generate_chart_screenshot(
+                        symbol=symbol,
+                        ticket=trade_res["ticket"],
+                        entry_price=trade_res["price"],
+                        sl_price=sl,
+                        tp_price=tp,
+                        timeframe_str=DEFAULT_TIMEFRAME,
+                        entry_time_str=entry_time_str
+                    )
+                    update_trade_screenshot(trade_res["ticket"], screenshot_url)
+                    print(f"[SCREENSHOT] Saved Harmonic Patterns chart to {screenshot_url}")
+                except Exception as ex:
+                    print(f"[SCREENSHOT] [ERROR] Failed to save Harmonic Patterns screenshot: {ex}")
+
+                try:
+                    from telegram_notifier import notify_trade_open
+                    from db_manager import update_trade_telegram_msg_id
+                    msg_id = notify_trade_open(
+                        ticket=trade_res["ticket"],
+                        symbol=symbol,
+                        action=decision,
+                        volume=volume,
+                        entry_price=trade_res["price"],
+                        sl=sl,
+                        tp=tp,
+                        reason=reason_msg,
+                        screenshot_url=screenshot_url
+                    )
+                    if msg_id:
+                        update_trade_telegram_msg_id(trade_res["ticket"], msg_id)
+                        print(f"[TELEGRAM] Harmonic Patterns trade open notification sent (Msg ID: {msg_id})")
+                except Exception as tg_ex:
+                    print(f"[TELEGRAM] [ERROR] Failed to send Harmonic Patterns open alert: {tg_ex}")
+            else:
+                print(f"[HARMONIC] [ERROR] Failed to execute trade order for {symbol}.")
+        except Exception as harmonic_ex:
+            print(f"[HARMONIC] [ERROR] {symbol}: {harmonic_ex}")
+
+
+def manage_classical_patterns_strategy(settings, active_news_events, risk_percent, auto_trade_enabled):
+    """
+    Independent, parallel strategy: detects classical technical chart
+    patterns — continuation (Rectangle/Triangle-variants/Wedge-variants/
+    Pennant/Flag, via detect_continuation_pattern) or reversal (Head &
+    Shoulders + inverse, Double Top/Bottom, via detect_reversal_pattern) —
+    and enters on a confirmed breakout of the pattern's defining level
+    (trendline or neckline). Structured exactly like the other five
+    strategies — its own symbol list, its own signal source, its own
+    SL/TP/lot-size pipeline.
+
+    Pure breakout entry, no RSI gate (see check_classical_pattern_signal's
+    docstring) — this is the strategy's second pure-breakout strategy
+    alongside Gann/Range Trading's breakout mode, in contrast to the
+    fade-style strategies (SMA5, Range-fade, Harmonic Patterns).
+
+    Left disabled by default (classical_patterns_enabled defaults to "0") —
+    this is a new, unvalidated strategy on a live account; see
+    backtest_classical_patterns.py.
+    """
+    if int(settings.get("classical_patterns_enabled", 0)) != 1:
+        return
+
+    classical_symbols = settings.get("classical_patterns_symbols", [])
+    pattern_types = settings.get("classical_patterns_types", None)
+    pole_lookback = int(settings.get("classical_patterns_pole_lookback", 20))
+    pole_min_move_pct = float(settings.get("classical_patterns_pole_min_move_pct", 0.5))
+    pole_min_efficiency = float(settings.get("classical_patterns_pole_min_efficiency", 0.4))
+    consolidation_max_bars = int(settings.get("classical_patterns_consolidation_max_bars", 40))
+    swing_window = int(settings.get("classical_patterns_swing_window", 3))
+    flat_slope_threshold_pct = float(settings.get("classical_patterns_flat_slope_threshold_pct", 0.02))
+    shoulder_tolerance_pct = float(settings.get("classical_patterns_shoulder_tolerance_pct", 3.0))
+    neckline_tolerance_pct = float(settings.get("classical_patterns_neckline_tolerance_pct", 2.0))
+    atr_period = int(settings.get("classical_patterns_atr_period", 14))
+    atr_sl_multiplier = float(settings.get("classical_patterns_atr_sl_multiplier", 1.0))
+    tp_multiplier = float(settings.get("classical_patterns_tp_multiplier", 1.0))
+    min_rr_ratio = float(settings.get("classical_patterns_min_rr_ratio", 1.0))
+    min_tp_spread_multiple = float(settings.get("classical_patterns_min_tp_spread_multiple", 2.0))
+
+    for symbol in classical_symbols:
+        try:
+            if any(event["currency"].upper() in symbol.upper() for event in active_news_events):
+                continue
+
+            fetch_count = pole_lookback + consolidation_max_bars + 100
+            candles_df = get_candles(symbol=symbol, timeframe=get_timeframe(DEFAULT_TIMEFRAME), count=fetch_count)
+            if candles_df is None or len(candles_df) < 20:
+                continue
+            candles_df = candles_df.reset_index(drop=True)
+
+            pattern_info = detect_continuation_pattern(
+                candles_df, pole_lookback=pole_lookback, pole_min_move_pct=pole_min_move_pct,
+                pole_min_efficiency=pole_min_efficiency, consolidation_max_bars=consolidation_max_bars,
+                swing_window=swing_window, flat_slope_threshold_pct=flat_slope_threshold_pct
+            )
+            is_continuation = pattern_info is not None
+            if not pattern_info:
+                pattern_info = detect_reversal_pattern(
+                    candles_df, lookback=pole_lookback + consolidation_max_bars, window=swing_window,
+                    shoulder_tolerance_pct=shoulder_tolerance_pct, neckline_tolerance_pct=neckline_tolerance_pct,
+                    patterns=pattern_types
+                )
+            if not pattern_info:
+                continue
+
+            decision, reason, context = check_classical_pattern_signal(candles_df, pattern_info, atr_period=atr_period)
+            if decision == "HOLD":
+                continue
+
+            pattern_name = context["pattern"]
+            level = context["level"]
+
+            # Duplicate same-direction entry guard
+            symbol_positions = [
+                pos for pos in get_open_positions()
+                if pos.magic == MAGIC_NUMBER and pos.symbol == symbol and "classical" in (pos.comment or "").lower()
+            ]
+            pos_type_str_map = {0: "BUY", 1: "SELL"}
+            if any(pos_type_str_map.get(pos.type) == decision for pos in symbol_positions):
+                continue
+
+            # Stop-loss cooldown reuse (no Gann-specific setup context here)
+            if is_setup_stopped_out(symbol, None, decision):
+                continue
+
+            symbol_info = mt5.symbol_info(symbol)
+            if not symbol_info:
+                continue
+
+            price_info = get_current_price(symbol)
+            if not price_info:
+                continue
+            entry_price = price_info['ask'] if decision == "BUY" else price_info['bid']
+            atr = context.get("atr") or 0.0
+
+            if is_continuation:
+                x_last = consolidation_max_bars - 1
+                if decision == "BUY":
+                    far_level = pattern_info["lower_slope"] * x_last + pattern_info["lower_intercept"]
+                    sl = far_level - atr * atr_sl_multiplier
+                    tp = level + pattern_info["pole_height"] * tp_multiplier
+                else:
+                    far_level = pattern_info["upper_slope"] * x_last + pattern_info["upper_intercept"]
+                    sl = far_level + atr * atr_sl_multiplier
+                    tp = level - pattern_info["pole_height"] * tp_multiplier
+            else:
+                head = pattern_info["head"]
+                if decision == "BUY":
+                    sl = head - atr * atr_sl_multiplier
+                    tp = level + (level - head) * tp_multiplier
+                else:
+                    sl = head + atr * atr_sl_multiplier
+                    tp = level - (head - level) * tp_multiplier
+
+            sl = round(sl, symbol_info.digits)
+            tp = round(tp, symbol_info.digits)
+
+            # TP must actually sit on the profitable side of entry. Entry can occur
+            # well beyond the breakout level/neckline on a strong move, so a target
+            # computed purely from level +/- a fixed offset can land behind entry —
+            # abs(tp - entry) would still look like a positive R:R, silently letting
+            # a losing trade through as if its target were ahead of it.
+            if decision == "BUY" and tp <= entry_price:
+                print(f"[CLASSICAL] {symbol} rejected: TP ({tp}) is not ahead of entry ({entry_price}) for a BUY.")
+                continue
+            if decision == "SELL" and tp >= entry_price:
+                print(f"[CLASSICAL] {symbol} rejected: TP ({tp}) is not ahead of entry ({entry_price}) for a SELL.")
+                continue
+
+            sl_dist = abs(entry_price - sl)
+            tp_dist = abs(tp - entry_price)
+            if sl_dist <= 0:
+                print(f"[CLASSICAL] {symbol} rejected: Stop Loss at or ahead of entry price.")
+                continue
+
+            # Spread guard: same rationale as the other strategies — MT5 closes a
+            # BUY at Bid and a SELL at Ask, not the price the level was computed from.
+            spread = price_info['ask'] - price_info['bid']
+            if tp_dist < spread * min_tp_spread_multiple:
+                print(f"[CLASSICAL] {symbol} rejected: TP distance ({tp_dist:.5f}) too small relative to spread ({spread:.5f}).")
+                continue
+
+            rr_ratio = tp_dist / sl_dist
+            if rr_ratio < min_rr_ratio:
+                print(f"[CLASSICAL] {symbol} rejected: R:R 1:{rr_ratio:.2f} below strategy floor 1:{min_rr_ratio:.2f}.")
+                continue
+
+            volume = calculate_lot_size(symbol, sl, entry_price, risk_percent=risk_percent)
+            reason_msg = f"Classical {pattern_name}: {reason}"
+            classical_context = {"type": decision, "pattern": pattern_name, "level": level}
+
+            if not auto_trade_enabled:
+                print(f"[CLASSICAL] Signal-Only Mode: {decision} on {symbol} at {entry_price} (SL: {sl}, TP: {tp}). Not executed.")
+                last_scan_reports[f"{symbol}_classical"] = {
+                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                    "status": "Signal Only (Classical)",
+                    "details": reason_msg,
+                    "structure": classical_context
+                }
+                continue
+
+            trade_res = open_trade(
+                action=decision,
+                symbol=symbol,
+                volume=volume,
+                sl=sl,
+                tp=tp,
+                magic=MAGIC_NUMBER,
+                comment=f"Classical {pattern_name} {decision}"[:28]
+            )
+
+            if trade_res and trade_res["success"]:
+                log_trade_open(
+                    ticket=trade_res["ticket"],
+                    symbol=symbol,
+                    action=decision,
+                    volume=volume,
+                    entry_price=trade_res["price"],
+                    sl=sl,
+                    tp=tp,
+                    reason=reason_msg,
+                    gann_data=classical_context
+                )
+                print(f"[CLASSICAL] Executed {decision} {volume} lots on {symbol} at {trade_res['price']} (SL: {sl}, TP: {tp}). Ticket: {trade_res['ticket']}.")
+                last_scan_reports[f"{symbol}_classical"] = {
+                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                    "status": f"Executed {decision} (Classical {pattern_name})",
+                    "details": reason_msg,
+                    "structure": classical_context
+                }
+
+                entry_time_str = time.strftime('%Y-%m-%d %H:%M:%S')
+                screenshot_url = None
+                try:
+                    from chart_generator import generate_chart_screenshot
+                    from db_manager import update_trade_screenshot
+
+                    screenshot_url = generate_chart_screenshot(
+                        symbol=symbol,
+                        ticket=trade_res["ticket"],
+                        entry_price=trade_res["price"],
+                        sl_price=sl,
+                        tp_price=tp,
+                        timeframe_str=DEFAULT_TIMEFRAME,
+                        entry_time_str=entry_time_str
+                    )
+                    update_trade_screenshot(trade_res["ticket"], screenshot_url)
+                    print(f"[SCREENSHOT] Saved Classical Patterns chart to {screenshot_url}")
+                except Exception as ex:
+                    print(f"[SCREENSHOT] [ERROR] Failed to save Classical Patterns screenshot: {ex}")
+
+                try:
+                    from telegram_notifier import notify_trade_open
+                    from db_manager import update_trade_telegram_msg_id
+                    msg_id = notify_trade_open(
+                        ticket=trade_res["ticket"],
+                        symbol=symbol,
+                        action=decision,
+                        volume=volume,
+                        entry_price=trade_res["price"],
+                        sl=sl,
+                        tp=tp,
+                        reason=reason_msg,
+                        screenshot_url=screenshot_url
+                    )
+                    if msg_id:
+                        update_trade_telegram_msg_id(trade_res["ticket"], msg_id)
+                        print(f"[TELEGRAM] Classical Patterns trade open notification sent (Msg ID: {msg_id})")
+                except Exception as tg_ex:
+                    print(f"[TELEGRAM] [ERROR] Failed to send Classical Patterns open alert: {tg_ex}")
+            else:
+                print(f"[CLASSICAL] [ERROR] Failed to execute trade order for {symbol}.")
+        except Exception as classical_ex:
+            print(f"[CLASSICAL] [ERROR] {symbol}: {classical_ex}")
 
 
 def check_and_execute_trading_cycle():
@@ -1944,6 +3090,27 @@ def check_and_execute_trading_cycle():
         except Exception as elliott_cycle_ex:
             print(f"[ERROR] Elliott Wave strategy pass failed: {elliott_cycle_ex}")
 
+    # 6. Run the Range Trading strategy — same independence guarantee as the other three.
+    if not max_positions_reached:
+        try:
+            manage_range_trading_strategy(settings, active_news_events, risk_percent, auto_trade_enabled)
+        except Exception as range_cycle_ex:
+            print(f"[ERROR] Range Trading strategy pass failed: {range_cycle_ex}")
+
+    # 7. Run the Harmonic Patterns strategy — same independence guarantee as the other four.
+    if not max_positions_reached:
+        try:
+            manage_harmonic_patterns_strategy(settings, active_news_events, risk_percent, auto_trade_enabled)
+        except Exception as harmonic_cycle_ex:
+            print(f"[ERROR] Harmonic Patterns strategy pass failed: {harmonic_cycle_ex}")
+
+    # 8. Run the Classical Chart Patterns strategy — same independence guarantee as the other five.
+    if not max_positions_reached:
+        try:
+            manage_classical_patterns_strategy(settings, active_news_events, risk_percent, auto_trade_enabled)
+        except Exception as classical_cycle_ex:
+            print(f"[ERROR] Classical Patterns strategy pass failed: {classical_cycle_ex}")
+
     # Fetch latest open positions for the report
     try:
         latest_active = get_open_positions()
@@ -2122,7 +3289,10 @@ def check_and_execute_trading_cycle():
                 f"{signals_str}\n{ai_err_str}\n"
                 f"⚙️ تم فحص {len(symbols_to_trade)} زوج (Gann) + "
                 f"{len(settings.get('sma5_reversion_symbols', []))} (SMA5) + "
-                f"{len(settings.get('elliott_wave_symbols', []))} (Elliott) بنجاح."
+                f"{len(settings.get('elliott_wave_symbols', []))} (Elliott) + "
+                f"{len(settings.get('range_trading_symbols', []))} (Range) + "
+                f"{len(settings.get('harmonic_patterns_symbols', []))} (Harmonic) + "
+                f"{len(settings.get('classical_patterns_symbols', []))} (Classical) بنجاح."
             )
             send_telegram_message(token, chat_id, report_msg)
             print("[TELEGRAM] Scanning cycle report sent successfully.")

@@ -71,9 +71,22 @@ def run_backtest_elliott_wave(df, symbol, lookback=100, min_retracement=0.382, m
 
         # --- Manage an active position ---
         if basket is not None:
-            # Elliott invalidation: Wave 4 must never overlap Wave 1 (point B)'s territory
-            invalidated = (basket["type"] == "BUY" and low_curr < basket["wave1"]) or \
-                          (basket["type"] == "SELL" and high_curr > basket["wave1"])
+            # Elliott invalidation: Wave 4 must never overlap Wave 1 (point B)'s
+            # territory. This only becomes a meaningful check AFTER price has
+            # actually confirmed Wave 3 by moving beyond Wave 1 at least once
+            # since entry — entry happens right as price crosses Wave 2 (C),
+            # which sits between A and B by construction, so checking overlap
+            # from the very first bar would flag almost every fresh trade
+            # immediately (Wave 3 hasn't started yet, that's not an overlap).
+            if basket["type"] == "BUY" and high_curr > basket["wave1"]:
+                basket["wave3_confirmed"] = True
+            elif basket["type"] == "SELL" and low_curr < basket["wave1"]:
+                basket["wave3_confirmed"] = True
+
+            invalidated = basket.get("wave3_confirmed", False) and (
+                (basket["type"] == "BUY" and low_curr < basket["wave1"]) or
+                (basket["type"] == "SELL" and high_curr > basket["wave1"])
+            )
 
             hit_sl = (basket["type"] == "BUY" and low_curr <= basket["sl"]) or \
                      (basket["type"] == "SELL" and high_curr >= basket["sl"])

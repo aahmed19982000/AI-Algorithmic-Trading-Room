@@ -179,6 +179,80 @@ def init_db():
         "elliott_wave_max_wave1_internal_retracement": "0.618",
         "elliott_wave_extension_ratio": "1.618",
         "elliott_wave_min_rr_ratio": "1.0",
+        "range_trading_enabled": "0",  # OFF by default — new, unvalidated strategy on a live account
+        "range_trading_symbols": json.dumps([
+            # Placeholder pool reused from other strategies' symbol lists — NOT a
+            # claim that these pairs range well, just a starting point pending
+            # backtest_range_trading.py review before any of this goes live.
+            "EURUSDm", "USDCHFm", "EURGBPm"
+        ]),
+        "range_trading_lookback": "100",
+        "range_trading_swing_window": "5",
+        "range_trading_peak_tolerance_pct": "0.15",
+        "range_trading_trough_tolerance_pct": "0.15",
+        "range_trading_adx_period": "14",
+        "range_trading_adx_threshold": "25.0",
+        "range_trading_adx_exit_threshold": "30.0",
+        "range_trading_entry_zone_pct": "0.15",
+        "range_trading_min_range_pct": "0.3",
+        "range_trading_max_range_pct": "3.0",
+        "range_trading_atr_period": "14",
+        "range_trading_atr_sl_multiplier": "1.0",
+        "range_trading_tp_buffer_pct": "10.0",
+        "range_trading_breakout_tp_multiplier": "1.0",
+        "range_trading_rsi_overbought": "65.0",
+        "range_trading_rsi_oversold": "35.0",
+        "range_trading_min_rr_ratio": "1.0",
+        "range_trading_min_tp_spread_multiple": "2.0",
+        "harmonic_patterns_enabled": "0",  # OFF by default — new, unvalidated strategy on a live account
+        "harmonic_patterns_symbols": json.dumps([
+            # Placeholder pool reused from other strategies' symbol lists — NOT a
+            # claim that these pairs form harmonic patterns well, just a starting
+            # point pending backtest_harmonic_patterns.py review before going live.
+            "EURUSDm", "USDCHFm", "EURGBPm"
+        ]),
+        "harmonic_patterns_lookback": "100",
+        "harmonic_patterns_swing_window": "5",
+        "harmonic_patterns_types": json.dumps(["Gartley", "Bat", "Butterfly", "Crab"]),
+        "harmonic_patterns_ratio_tolerance_pct": "5.0",
+        "harmonic_patterns_prz_confluence_pct": "10.0",
+        "harmonic_patterns_entry_zone_pct": "0.15",
+        "harmonic_patterns_atr_period": "14",
+        "harmonic_patterns_atr_sl_multiplier": "1.0",
+        "harmonic_patterns_tp_retracement_ratio": "0.618",
+        "harmonic_patterns_rsi_overbought": "65.0",
+        "harmonic_patterns_rsi_oversold": "35.0",
+        "harmonic_patterns_min_rr_ratio": "1.0",
+        "harmonic_patterns_min_tp_spread_multiple": "2.0",
+        "classical_patterns_enabled": "0",  # OFF by default — new, unvalidated strategy on a live account
+        "classical_patterns_symbols": json.dumps([
+            # Placeholder pool reused from other strategies' symbol lists — NOT a
+            # claim these pairs form classical chart patterns well, just a starting
+            # point pending backtest_classical_patterns.py review before going live.
+            "EURUSDm", "USDCHFm", "EURGBPm"
+        ]),
+        "classical_patterns_types": json.dumps([
+            "Rectangle", "Ascending Triangle", "Descending Triangle", "Rising Wedge",
+            "Falling Wedge", "Pennant", "Flag",
+            "Head and Shoulders", "Inverse Head and Shoulders", "Double Top", "Double Bottom"
+        ]),
+        "classical_patterns_pole_lookback": "20",
+        # Recalibrated from an initial 1.5%/0.6 after a live H1 diagnostic run
+        # produced zero trades across 3 symbols over a full year — too strict
+        # for typical H1 forex volatility. 0.5%/0.4 produced a bounded, sane
+        # ~35-trade/year profile per symbol; still worth revisiting per-symbol.
+        "classical_patterns_pole_min_move_pct": "0.5",
+        "classical_patterns_pole_min_efficiency": "0.4",
+        "classical_patterns_consolidation_max_bars": "40",
+        "classical_patterns_swing_window": "3",
+        "classical_patterns_flat_slope_threshold_pct": "0.02",
+        "classical_patterns_shoulder_tolerance_pct": "3.0",
+        "classical_patterns_neckline_tolerance_pct": "2.0",
+        "classical_patterns_atr_period": "14",
+        "classical_patterns_atr_sl_multiplier": "1.0",
+        "classical_patterns_tp_multiplier": "1.0",
+        "classical_patterns_min_rr_ratio": "1.0",
+        "classical_patterns_min_tp_spread_multiple": "2.0",
         "telegram_enabled": "0",
         "telegram_token": "",
         "telegram_chat_id": "",
@@ -197,7 +271,58 @@ def init_db():
         "financial_instruments": defaults["financial_instruments"],
         "regulations": defaults["regulations"],
         "ai_evaluation": "1",
-        "fallback_to_technical": "1"
+        "fallback_to_technical": "1",
+        "range_trading_enabled": defaults["range_trading_enabled"],
+        "range_trading_symbols": defaults["range_trading_symbols"],
+        "range_trading_lookback": defaults["range_trading_lookback"],
+        "range_trading_swing_window": defaults["range_trading_swing_window"],
+        "range_trading_peak_tolerance_pct": defaults["range_trading_peak_tolerance_pct"],
+        "range_trading_trough_tolerance_pct": defaults["range_trading_trough_tolerance_pct"],
+        "range_trading_adx_period": defaults["range_trading_adx_period"],
+        "range_trading_adx_threshold": defaults["range_trading_adx_threshold"],
+        "range_trading_adx_exit_threshold": defaults["range_trading_adx_exit_threshold"],
+        "range_trading_entry_zone_pct": defaults["range_trading_entry_zone_pct"],
+        "range_trading_min_range_pct": defaults["range_trading_min_range_pct"],
+        "range_trading_max_range_pct": defaults["range_trading_max_range_pct"],
+        "range_trading_atr_period": defaults["range_trading_atr_period"],
+        "range_trading_atr_sl_multiplier": defaults["range_trading_atr_sl_multiplier"],
+        "range_trading_tp_buffer_pct": defaults["range_trading_tp_buffer_pct"],
+        "range_trading_breakout_tp_multiplier": defaults["range_trading_breakout_tp_multiplier"],
+        "range_trading_rsi_overbought": defaults["range_trading_rsi_overbought"],
+        "range_trading_rsi_oversold": defaults["range_trading_rsi_oversold"],
+        "range_trading_min_rr_ratio": defaults["range_trading_min_rr_ratio"],
+        "range_trading_min_tp_spread_multiple": defaults["range_trading_min_tp_spread_multiple"],
+        "harmonic_patterns_enabled": defaults["harmonic_patterns_enabled"],
+        "harmonic_patterns_symbols": defaults["harmonic_patterns_symbols"],
+        "harmonic_patterns_lookback": defaults["harmonic_patterns_lookback"],
+        "harmonic_patterns_swing_window": defaults["harmonic_patterns_swing_window"],
+        "harmonic_patterns_types": defaults["harmonic_patterns_types"],
+        "harmonic_patterns_ratio_tolerance_pct": defaults["harmonic_patterns_ratio_tolerance_pct"],
+        "harmonic_patterns_prz_confluence_pct": defaults["harmonic_patterns_prz_confluence_pct"],
+        "harmonic_patterns_entry_zone_pct": defaults["harmonic_patterns_entry_zone_pct"],
+        "harmonic_patterns_atr_period": defaults["harmonic_patterns_atr_period"],
+        "harmonic_patterns_atr_sl_multiplier": defaults["harmonic_patterns_atr_sl_multiplier"],
+        "harmonic_patterns_tp_retracement_ratio": defaults["harmonic_patterns_tp_retracement_ratio"],
+        "harmonic_patterns_rsi_overbought": defaults["harmonic_patterns_rsi_overbought"],
+        "harmonic_patterns_rsi_oversold": defaults["harmonic_patterns_rsi_oversold"],
+        "harmonic_patterns_min_rr_ratio": defaults["harmonic_patterns_min_rr_ratio"],
+        "harmonic_patterns_min_tp_spread_multiple": defaults["harmonic_patterns_min_tp_spread_multiple"],
+        "classical_patterns_enabled": defaults["classical_patterns_enabled"],
+        "classical_patterns_symbols": defaults["classical_patterns_symbols"],
+        "classical_patterns_types": defaults["classical_patterns_types"],
+        "classical_patterns_pole_lookback": defaults["classical_patterns_pole_lookback"],
+        "classical_patterns_pole_min_move_pct": defaults["classical_patterns_pole_min_move_pct"],
+        "classical_patterns_pole_min_efficiency": defaults["classical_patterns_pole_min_efficiency"],
+        "classical_patterns_consolidation_max_bars": defaults["classical_patterns_consolidation_max_bars"],
+        "classical_patterns_swing_window": defaults["classical_patterns_swing_window"],
+        "classical_patterns_flat_slope_threshold_pct": defaults["classical_patterns_flat_slope_threshold_pct"],
+        "classical_patterns_shoulder_tolerance_pct": defaults["classical_patterns_shoulder_tolerance_pct"],
+        "classical_patterns_neckline_tolerance_pct": defaults["classical_patterns_neckline_tolerance_pct"],
+        "classical_patterns_atr_period": defaults["classical_patterns_atr_period"],
+        "classical_patterns_atr_sl_multiplier": defaults["classical_patterns_atr_sl_multiplier"],
+        "classical_patterns_tp_multiplier": defaults["classical_patterns_tp_multiplier"],
+        "classical_patterns_min_rr_ratio": defaults["classical_patterns_min_rr_ratio"],
+        "classical_patterns_min_tp_spread_multiple": defaults["classical_patterns_min_tp_spread_multiple"]
     }
     for key, def_val in extra_keys.items():
         cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
@@ -337,6 +462,12 @@ def classify_trade_strategy(reason):
         return "SMA5 Reversion"
     if "elliott wave" in text:
         return "Elliott Wave"
+    if "range trading" in text:
+        return "Range Trading"
+    if "harmonic" in text:
+        return "Harmonic Patterns"
+    if "classical" in text:
+        return "Classical Chart Patterns"
     if "gann" in text:
         return "Gann"
     return "Technical Fallback"
