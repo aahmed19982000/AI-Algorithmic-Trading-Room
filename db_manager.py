@@ -142,6 +142,10 @@ def init_db():
     defaults = {
         "strategy_prompt": DEFAULT_GANN_STRATEGY,
         "symbols": json.dumps(["EURUSDm"]),
+        # Shared across all six strategies: each scans every symbol on each of
+        # these timeframes independently every cycle (not per-strategy, since
+        # all strategies were asked for the same multi-timeframe treatment).
+        "scan_timeframes": json.dumps(["D1", "H4", "H1", "M30"]),
         "risk_percent": "3.0",
         "max_positions": "2",
         "auto_trade": "1",  # 1 = Auto execution, 0 = Signal Only (manual)
@@ -290,6 +294,7 @@ def init_db():
         "regulations": defaults["regulations"],
         "ai_evaluation": "1",
         "fallback_to_technical": "1",
+        "scan_timeframes": defaults["scan_timeframes"],
         "range_trading_enabled": defaults["range_trading_enabled"],
         "range_trading_symbols": defaults["range_trading_symbols"],
         "range_trading_lookback": defaults["range_trading_lookback"],

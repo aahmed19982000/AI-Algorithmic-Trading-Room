@@ -256,6 +256,11 @@ def check_elliott_wave4_overlap(ticket, pos_type, current_price):
     if not symbol or not open_time_str:
         return False
 
+    # Re-check on the same timeframe the setup was actually detected on (each
+    # strategy now scans all of scan_timeframes, not one shared default) —
+    # falls back to DEFAULT_TIMEFRAME for trades opened before this was tracked.
+    position_timeframe = context.get("timeframe", DEFAULT_TIMEFRAME)
+
     # Wave 4 non-overlap only becomes a meaningful invalidation AFTER price has
     # actually confirmed Wave 3 by moving beyond Wave 1's extreme (B) at least
     # once since entry. Checking this from the moment of entry — while price is
@@ -265,7 +270,7 @@ def check_elliott_wave4_overlap(ticket, pos_type, current_price):
     try:
         import datetime as _dt
         open_dt = _dt.datetime.strptime(open_time_str, "%Y-%m-%d %H:%M:%S")
-        candles = get_candles(symbol=symbol, timeframe=get_timeframe(DEFAULT_TIMEFRAME), count=200)
+        candles = get_candles(symbol=symbol, timeframe=get_timeframe(position_timeframe), count=200)
         if candles is None or len(candles) == 0:
             return False
         since_entry = candles[candles['Time'] >= open_dt]
@@ -570,7 +575,7 @@ def check_range_trading_signal(df, current_price, range_info, adx_period=14, adx
     ), base_context
 
 
-def check_range_trading_invalidation(symbol, ticket, mode, range_top, range_bottom, adx_exit_threshold, adx_period=14):
+def check_range_trading_invalidation(symbol, ticket, mode, range_top, range_bottom, adx_exit_threshold, adx_period=14, timeframe_str=None):
     """
     Post-entry invalidation check for a Range Trading position, cached per
     completed candle — ADX/price only change on a new bar, so recomputing on
@@ -592,7 +597,11 @@ def check_range_trading_invalidation(symbol, ticket, mode, range_top, range_bott
     import pandas as pd
     global last_range_check_candle, last_range_check_result
 
-    df = get_candles(symbol=symbol, timeframe=get_timeframe(DEFAULT_TIMEFRAME), count=max(adx_period * 3, 50))
+    # Re-check on the same timeframe the range was actually detected on (each
+    # strategy now scans all of scan_timeframes, not one shared default) —
+    # falls back to DEFAULT_TIMEFRAME for trades opened before this was tracked.
+    resolved_timeframe = timeframe_str or DEFAULT_TIMEFRAME
+    df = get_candles(symbol=symbol, timeframe=get_timeframe(resolved_timeframe), count=max(adx_period * 3, 50))
     if df is None or len(df) < 20:
         return False
     df = df.reset_index(drop=True)
@@ -743,7 +752,7 @@ def check_classical_pattern_signal(df, pattern_info, atr_period=14):
     return "HOLD", f"Price has not yet broken the {pattern_name} {level_label} ({level:.5f}).", base_context
 
 
-def check_classical_pattern_invalidation(symbol, ticket, pos_type, level):
+def check_classical_pattern_invalidation(symbol, ticket, pos_type, level, timeframe_str=None):
     """
     Post-entry invalidation check for a Classical Patterns position, cached
     per completed candle — same idiom as check_range_trading_invalidation
@@ -759,7 +768,11 @@ def check_classical_pattern_invalidation(symbol, ticket, pos_type, level):
     """
     global last_classical_check_candle, last_classical_check_result
 
-    df = get_candles(symbol=symbol, timeframe=get_timeframe(DEFAULT_TIMEFRAME), count=20)
+    # Re-check on the same timeframe the pattern was actually detected on (each
+    # strategy now scans all of scan_timeframes, not one shared default) —
+    # falls back to DEFAULT_TIMEFRAME for trades opened before this was tracked.
+    resolved_timeframe = timeframe_str or DEFAULT_TIMEFRAME
+    df = get_candles(symbol=symbol, timeframe=get_timeframe(resolved_timeframe), count=20)
     if df is None or len(df) < 3:
         return False
 
@@ -1089,10 +1102,12 @@ def manage_active_positions_grid():
                     pos_mode = range_context.get("mode")
                     pos_range_top = range_context.get("range_top")
                     pos_range_bottom = range_context.get("range_bottom")
+                    pos_timeframe = range_context.get("timeframe")
                     if pos_mode is None or pos_range_top is None or pos_range_bottom is None:
                         continue
                     if check_range_trading_invalidation(symbol, pos.ticket, pos_mode, pos_range_top, pos_range_bottom,
-                                                         range_adx_exit_threshold, adx_period=range_adx_period):
+                                                         range_adx_exit_threshold, adx_period=range_adx_period,
+                                                         timeframe_str=pos_timeframe):
                         reason_label = "ADX regime-break (no longer ranging)" if pos_mode == "fade" else "Failed breakout (closed back inside range)"
                         print(f"[RANGE INVALIDATION] {reason_label} on {symbol} (ticket #{pos.ticket}). Closing.")
                         close_res = close_position(ticket=pos.ticket, comment="Range Trading Invalidation")
@@ -1123,9 +1138,10 @@ def manage_active_positions_grid():
                         continue
                     pos_type = classical_context.get("type")
                     pos_level = classical_context.get("level")
+                    pos_timeframe = classical_context.get("timeframe")
                     if pos_type is None or pos_level is None:
                         continue
-                    if check_classical_pattern_invalidation(symbol, pos.ticket, pos_type, pos_level):
+                    if check_classical_pattern_invalidation(symbol, pos.ticket, pos_type, pos_level, timeframe_str=pos_timeframe):
                         print(f"[CLASSICAL INVALIDATION] Failed breakout on {symbol} (ticket #{pos.ticket}). Closing.")
                         close_res = close_position(ticket=pos.ticket, comment="Classical Pattern Invalidation")
                         if close_res:
@@ -1196,6 +1212,11 @@ def manage_sma5_reversion_strategy(settings, active_news_events, risk_percent, a
     Trades its own symbol list (`sma5_reversion_symbols`), independent of the
     Gann strategy's `symbols` setting — backtesting showed several symbols are
     a poor fit for this specific strategy (see sma5_reversion_symbols default).
+
+    Scans every symbol across every configured timeframe (`scan_timeframes`)
+    each cycle — a position is still capped at one per symbol per strategy
+    regardless of which timeframe triggers it (the duplicate-direction guard
+    below is timeframe-agnostic by design).
     """
     if int(settings.get("sma5_reversion_enabled", 1)) != 1:
         return
@@ -1207,140 +1228,101 @@ def manage_sma5_reversion_strategy(settings, active_news_events, risk_percent, a
     rsi_overbought = float(settings.get("sma5_reversion_rsi_overbought", 65.0))
     rsi_oversold = float(settings.get("sma5_reversion_rsi_oversold", 35.0))
     min_tp_spread_multiple = float(settings.get("sma5_reversion_min_tp_spread_multiple", 2.0))
+    scan_timeframes = settings.get("scan_timeframes", [DEFAULT_TIMEFRAME])
 
     for symbol in sma5_symbols:
-        try:
-            # News freeze check (reuses the same events computed once per cycle)
-            if any(event["currency"].upper() in symbol.upper() for event in active_news_events):
-                continue
+        for timeframe_str in scan_timeframes:
+            try:
+                # News freeze check (reuses the same events computed once per cycle)
+                if any(event["currency"].upper() in symbol.upper() for event in active_news_events):
+                    continue
 
-            candles_df = get_candles(symbol=symbol, timeframe=get_timeframe(DEFAULT_TIMEFRAME), count=50)
-            if candles_df is None or len(candles_df) < 20:
-                continue
+                candles_df = get_candles(symbol=symbol, timeframe=get_timeframe(timeframe_str), count=50)
+                if candles_df is None or len(candles_df) < 20:
+                    continue
 
-            price_info = get_current_price(symbol)
-            if not price_info:
-                continue
+                price_info = get_current_price(symbol)
+                if not price_info:
+                    continue
 
-            mid_price = (price_info['bid'] + price_info['ask']) / 2.0
-            decision, reason, sma5 = check_sma5_reversion_signal(candles_df, mid_price, threshold_pct, rsi_overbought, rsi_oversold)
+                mid_price = (price_info['bid'] + price_info['ask']) / 2.0
+                decision, reason, sma5 = check_sma5_reversion_signal(candles_df, mid_price, threshold_pct, rsi_overbought, rsi_oversold)
 
-            if decision == "HOLD":
-                continue
+                if decision == "HOLD":
+                    continue
 
-            # Duplicate same-direction entry guard
-            symbol_positions = [
-                pos for pos in get_open_positions()
-                if pos.magic == MAGIC_NUMBER and pos.symbol == symbol and "sma5" in (pos.comment or "").lower()
-            ]
-            pos_type_str_map = {0: "BUY", 1: "SELL"}
-            if any(pos_type_str_map.get(pos.type) == decision for pos in symbol_positions):
-                continue
+                # Duplicate same-direction entry guard
+                symbol_positions = [
+                    pos for pos in get_open_positions()
+                    if pos.magic == MAGIC_NUMBER and pos.symbol == symbol and "sma5" in (pos.comment or "").lower()
+                ]
+                pos_type_str_map = {0: "BUY", 1: "SELL"}
+                if any(pos_type_str_map.get(pos.type) == decision for pos in symbol_positions):
+                    continue
 
-            # Stop-loss cooldown reuse (no Gann-specific setup context here)
-            if is_setup_stopped_out(symbol, None, decision):
-                continue
+                # Stop-loss cooldown reuse (no Gann-specific setup context here)
+                if is_setup_stopped_out(symbol, None, decision):
+                    continue
 
-            symbol_info = mt5.symbol_info(symbol)
-            if not symbol_info:
-                continue
+                symbol_info = mt5.symbol_info(symbol)
+                if not symbol_info:
+                    continue
 
-            entry_price = price_info['ask'] if decision == "BUY" else price_info['bid']
-            deviation_distance = abs(entry_price - sma5)
-            sl_distance = sl_multiplier * deviation_distance
-            sl = entry_price - sl_distance if decision == "BUY" else entry_price + sl_distance
-            tp = sma5
+                entry_price = price_info['ask'] if decision == "BUY" else price_info['bid']
+                deviation_distance = abs(entry_price - sma5)
+                sl_distance = sl_multiplier * deviation_distance
+                sl = entry_price - sl_distance if decision == "BUY" else entry_price + sl_distance
+                tp = sma5
 
-            sl = round(sl, symbol_info.digits)
-            tp = round(tp, symbol_info.digits)
+                sl = round(sl, symbol_info.digits)
+                tp = round(tp, symbol_info.digits)
 
-            sl_dist = abs(entry_price - sl)
-            tp_dist = abs(tp - entry_price)
-            if sl_dist <= 0:
-                print(f"[SMA5 REVERSION] {symbol} rejected: Stop Loss at or ahead of entry price.")
-                continue
+                sl_dist = abs(entry_price - sl)
+                tp_dist = abs(tp - entry_price)
+                if sl_dist <= 0:
+                    print(f"[SMA5 REVERSION] {symbol} ({timeframe_str}) rejected: Stop Loss at or ahead of entry price.")
+                    continue
 
-            # Spread guard: MT5 closes a BUY at Bid and a SELL at Ask, not at the mid-price
-            # the TP was computed from — so the spread eats directly into this strategy's
-            # small reversion target. If the target isn't comfortably bigger than the current
-            # spread, the position may sit open long past "reaching" its nominal TP, or never
-            # close at all. Require the target to be at least a configurable multiple of spread.
-            spread = price_info['ask'] - price_info['bid']
-            if tp_dist < spread * min_tp_spread_multiple:
-                print(f"[SMA5 REVERSION] {symbol} rejected: TP distance ({tp_dist:.5f}) too small relative to spread ({spread:.5f}) — would rarely/never close at target.")
-                continue
+                # Spread guard: MT5 closes a BUY at Bid and a SELL at Ask, not at the mid-price
+                # the TP was computed from — so the spread eats directly into this strategy's
+                # small reversion target. If the target isn't comfortably bigger than the current
+                # spread, the position may sit open long past "reaching" its nominal TP, or never
+                # close at all. Require the target to be at least a configurable multiple of spread.
+                spread = price_info['ask'] - price_info['bid']
+                if tp_dist < spread * min_tp_spread_multiple:
+                    print(f"[SMA5 REVERSION] {symbol} ({timeframe_str}) rejected: TP distance ({tp_dist:.5f}) too small relative to spread ({spread:.5f}) — would rarely/never close at target.")
+                    continue
 
-            rr_ratio = tp_dist / sl_dist
-            if rr_ratio < min_rr_ratio:
-                print(f"[SMA5 REVERSION] {symbol} rejected: R:R 1:{rr_ratio:.2f} below strategy floor 1:{min_rr_ratio:.2f}.")
-                continue
+                rr_ratio = tp_dist / sl_dist
+                if rr_ratio < min_rr_ratio:
+                    print(f"[SMA5 REVERSION] {symbol} ({timeframe_str}) rejected: R:R 1:{rr_ratio:.2f} below strategy floor 1:{min_rr_ratio:.2f}.")
+                    continue
 
-            volume = calculate_lot_size(symbol, sl, entry_price, risk_percent=risk_percent)
-            reason_msg = f"SMA5 Reversion: {reason}"
+                volume = calculate_lot_size(symbol, sl, entry_price, risk_percent=risk_percent)
+                reason_msg = f"SMA5 Reversion ({timeframe_str}): {reason}"
 
-            if not auto_trade_enabled:
-                print(f"[SMA5 REVERSION] Signal-Only Mode: {decision} on {symbol} at {entry_price} (SL: {sl}, TP: {tp}). Not executed.")
-                last_scan_reports[f"{symbol}_sma5"] = {
-                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
-                    "status": "Signal Only (SMA5)",
-                    "details": reason_msg,
-                    "structure": None
-                }
-                continue
+                if not auto_trade_enabled:
+                    print(f"[SMA5 REVERSION] Signal-Only Mode: {decision} on {symbol} ({timeframe_str}) at {entry_price} (SL: {sl}, TP: {tp}). Not executed.")
+                    last_scan_reports[f"{symbol}_sma5_{timeframe_str}"] = {
+                        "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                        "status": "Signal Only (SMA5)",
+                        "details": reason_msg,
+                        "structure": None
+                    }
+                    continue
 
-            trade_res = open_trade(
-                action=decision,
-                symbol=symbol,
-                volume=volume,
-                sl=sl,
-                tp=tp,
-                magic=MAGIC_NUMBER,
-                comment=f"SMA5 Reversion {decision}"[:28]
-            )
-
-            if trade_res and trade_res["success"]:
-                log_trade_open(
-                    ticket=trade_res["ticket"],
-                    symbol=symbol,
+                trade_res = open_trade(
                     action=decision,
+                    symbol=symbol,
                     volume=volume,
-                    entry_price=trade_res["price"],
                     sl=sl,
                     tp=tp,
-                    reason=reason_msg
+                    magic=MAGIC_NUMBER,
+                    comment=f"SMA5 Reversion {decision}"[:28]
                 )
-                print(f"[SMA5 REVERSION] Executed {decision} {volume} lots on {symbol} at {trade_res['price']} (SL: {sl}, TP: {tp}). Ticket: {trade_res['ticket']}.")
-                last_scan_reports[f"{symbol}_sma5"] = {
-                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
-                    "status": f"Executed {decision} (SMA5)",
-                    "details": reason_msg,
-                    "structure": None
-                }
 
-                entry_time_str = time.strftime('%Y-%m-%d %H:%M:%S')
-                screenshot_url = None
-                try:
-                    from chart_generator import generate_chart_screenshot
-                    from db_manager import update_trade_screenshot
-
-                    screenshot_url = generate_chart_screenshot(
-                        symbol=symbol,
-                        ticket=trade_res["ticket"],
-                        entry_price=trade_res["price"],
-                        sl_price=sl,
-                        tp_price=tp,
-                        timeframe_str=DEFAULT_TIMEFRAME,
-                        entry_time_str=entry_time_str
-                    )
-                    update_trade_screenshot(trade_res["ticket"], screenshot_url)
-                    print(f"[SCREENSHOT] Saved SMA5 trade chart to {screenshot_url}")
-                except Exception as ex:
-                    print(f"[SCREENSHOT] [ERROR] Failed to save SMA5 screenshot: {ex}")
-
-                try:
-                    from telegram_notifier import notify_trade_open
-                    from db_manager import update_trade_telegram_msg_id
-                    msg_id = notify_trade_open(
+                if trade_res and trade_res["success"]:
+                    log_trade_open(
                         ticket=trade_res["ticket"],
                         symbol=symbol,
                         action=decision,
@@ -1349,17 +1331,60 @@ def manage_sma5_reversion_strategy(settings, active_news_events, risk_percent, a
                         sl=sl,
                         tp=tp,
                         reason=reason_msg,
-                        screenshot_url=screenshot_url
+                        gann_data={"timeframe": timeframe_str}
                     )
-                    if msg_id:
-                        update_trade_telegram_msg_id(trade_res["ticket"], msg_id)
-                        print(f"[TELEGRAM] SMA5 reversion trade open notification sent (Msg ID: {msg_id})")
-                except Exception as tg_ex:
-                    print(f"[TELEGRAM] [ERROR] Failed to send SMA5 reversion open alert: {tg_ex}")
-            else:
-                print(f"[SMA5 REVERSION] [ERROR] Failed to execute trade order for {symbol}.")
-        except Exception as sma5_ex:
-            print(f"[SMA5 REVERSION] [ERROR] {symbol}: {sma5_ex}")
+                    print(f"[SMA5 REVERSION] Executed {decision} {volume} lots on {symbol} ({timeframe_str}) at {trade_res['price']} (SL: {sl}, TP: {tp}). Ticket: {trade_res['ticket']}.")
+                    last_scan_reports[f"{symbol}_sma5_{timeframe_str}"] = {
+                        "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                        "status": f"Executed {decision} (SMA5)",
+                        "details": reason_msg,
+                        "structure": None
+                    }
+
+                    entry_time_str = time.strftime('%Y-%m-%d %H:%M:%S')
+                    screenshot_url = None
+                    try:
+                        from chart_generator import generate_chart_screenshot
+                        from db_manager import update_trade_screenshot
+
+                        screenshot_url = generate_chart_screenshot(
+                            symbol=symbol,
+                            ticket=trade_res["ticket"],
+                            entry_price=trade_res["price"],
+                            sl_price=sl,
+                            tp_price=tp,
+                            timeframe_str=timeframe_str,
+                            entry_time_str=entry_time_str
+                        )
+                        update_trade_screenshot(trade_res["ticket"], screenshot_url)
+                        print(f"[SCREENSHOT] Saved SMA5 trade chart to {screenshot_url}")
+                    except Exception as ex:
+                        print(f"[SCREENSHOT] [ERROR] Failed to save SMA5 screenshot: {ex}")
+
+                    try:
+                        from telegram_notifier import notify_trade_open
+                        from db_manager import update_trade_telegram_msg_id
+                        msg_id = notify_trade_open(
+                            ticket=trade_res["ticket"],
+                            symbol=symbol,
+                            action=decision,
+                            volume=volume,
+                            entry_price=trade_res["price"],
+                            sl=sl,
+                            tp=tp,
+                            reason=reason_msg,
+                            screenshot_url=screenshot_url,
+                            timeframe=timeframe_str
+                        )
+                        if msg_id:
+                            update_trade_telegram_msg_id(trade_res["ticket"], msg_id)
+                            print(f"[TELEGRAM] SMA5 reversion trade open notification sent (Msg ID: {msg_id})")
+                    except Exception as tg_ex:
+                        print(f"[TELEGRAM] [ERROR] Failed to send SMA5 reversion open alert: {tg_ex}")
+                else:
+                    print(f"[SMA5 REVERSION] [ERROR] Failed to execute trade order for {symbol} ({timeframe_str}).")
+            except Exception as sma5_ex:
+                print(f"[SMA5 REVERSION] [ERROR] {symbol} ({timeframe_str}): {sma5_ex}")
 
 
 def manage_elliott_wave_strategy(settings, active_news_events, risk_percent, auto_trade_enabled):
@@ -1373,6 +1398,11 @@ def manage_elliott_wave_strategy(settings, active_news_events, risk_percent, aut
     SL sits at Wave 0 (the point A price) — this is not an arbitrary choice,
     it is the exact Elliott invalidation level ("Wave 2 never retraces beyond
     Wave 1's start"), so the stop-loss and the rule are the same price.
+
+    Scans every symbol across every configured timeframe (`scan_timeframes`)
+    each cycle — a position is still capped at one per symbol per strategy
+    regardless of which timeframe triggers it (the duplicate-direction guard
+    below is timeframe-agnostic by design).
     """
     if int(settings.get("elliott_wave_enabled", 1)) != 1:
         return
@@ -1384,157 +1414,116 @@ def manage_elliott_wave_strategy(settings, active_news_events, risk_percent, aut
     max_wave1_internal_retracement = float(settings.get("elliott_wave_max_wave1_internal_retracement", 0.618))
     extension_ratio = float(settings.get("elliott_wave_extension_ratio", 1.618))
     min_rr_ratio = float(settings.get("elliott_wave_min_rr_ratio", 1.0))
+    scan_timeframes = settings.get("scan_timeframes", [DEFAULT_TIMEFRAME])
 
     for symbol in elliott_symbols:
-        try:
-            # News freeze check (reuses the same events computed once per cycle)
-            if any(event["currency"].upper() in symbol.upper() for event in active_news_events):
-                continue
+        for timeframe_str in scan_timeframes:
+            try:
+                # News freeze check (reuses the same events computed once per cycle)
+                if any(event["currency"].upper() in symbol.upper() for event in active_news_events):
+                    continue
 
-            candles_df = get_candles(symbol=symbol, timeframe=get_timeframe(DEFAULT_TIMEFRAME), count=lookback + 50)
-            if candles_df is None or len(candles_df) < 20:
-                continue
+                candles_df = get_candles(symbol=symbol, timeframe=get_timeframe(timeframe_str), count=lookback + 50)
+                if candles_df is None or len(candles_df) < 20:
+                    continue
 
-            setup = detect_elliott_wave2_setup(
-                candles_df, lookback=lookback,
-                min_retracement=min_retracement, max_retracement=max_retracement,
-                max_wave1_internal_retracement=max_wave1_internal_retracement
-            )
-            if not setup:
-                continue
+                setup = detect_elliott_wave2_setup(
+                    candles_df, lookback=lookback,
+                    min_retracement=min_retracement, max_retracement=max_retracement,
+                    max_wave1_internal_retracement=max_wave1_internal_retracement
+                )
+                if not setup:
+                    continue
 
-            # Freshness: Wave 2 (point C) must have completed recently, not ancient history
-            last_idx = len(candles_df) - 1
-            if last_idx - setup["idx_C"] > 5:
-                continue
+                # Freshness: Wave 2 (point C) must have completed recently, not ancient history
+                last_idx = len(candles_df) - 1
+                if last_idx - setup["idx_C"] > 5:
+                    continue
 
-            price_info = get_current_price(symbol)
-            if not price_info:
-                continue
-            mid_price = (price_info['bid'] + price_info['ask']) / 2.0
+                price_info = get_current_price(symbol)
+                if not price_info:
+                    continue
+                mid_price = (price_info['bid'] + price_info['ask']) / 2.0
 
-            decision = setup["type"]
-            wave0, wave1, wave2 = setup["A"], setup["B"], setup["C"]
+                decision = setup["type"]
+                wave0, wave1, wave2 = setup["A"], setup["B"], setup["C"]
 
-            # Entry confirmation: price must already be reversing away from C in the
-            # Wave 1 direction (Wave 2 has bottomed/topped and Wave 3 is beginning)
-            if decision == "BUY" and mid_price <= wave2:
-                continue
-            if decision == "SELL" and mid_price >= wave2:
-                continue
+                # Entry confirmation: price must already be reversing away from C in the
+                # Wave 1 direction (Wave 2 has bottomed/topped and Wave 3 is beginning)
+                if decision == "BUY" and mid_price <= wave2:
+                    continue
+                if decision == "SELL" and mid_price >= wave2:
+                    continue
 
-            # Duplicate same-direction entry guard
-            symbol_positions = [
-                pos for pos in get_open_positions()
-                if pos.magic == MAGIC_NUMBER and pos.symbol == symbol and "elliott" in (pos.comment or "").lower()
-            ]
-            pos_type_str_map = {0: "BUY", 1: "SELL"}
-            if any(pos_type_str_map.get(pos.type) == decision for pos in symbol_positions):
-                continue
+                # Duplicate same-direction entry guard
+                symbol_positions = [
+                    pos for pos in get_open_positions()
+                    if pos.magic == MAGIC_NUMBER and pos.symbol == symbol and "elliott" in (pos.comment or "").lower()
+                ]
+                pos_type_str_map = {0: "BUY", 1: "SELL"}
+                if any(pos_type_str_map.get(pos.type) == decision for pos in symbol_positions):
+                    continue
 
-            # Stop-loss cooldown reuse (no Gann-specific setup context here)
-            if is_setup_stopped_out(symbol, None, decision):
-                continue
+                # Stop-loss cooldown reuse (no Gann-specific setup context here)
+                if is_setup_stopped_out(symbol, None, decision):
+                    continue
 
-            symbol_info = mt5.symbol_info(symbol)
-            if not symbol_info:
-                continue
+                symbol_info = mt5.symbol_info(symbol)
+                if not symbol_info:
+                    continue
 
-            entry_price = price_info['ask'] if decision == "BUY" else price_info['bid']
-            sl = wave0  # Wave 0 = the exact Elliott invalidation level
-            tp = calculate_fibonacci_extension(wave0, wave1, extension_ratio)  # Wave 3 target
+                entry_price = price_info['ask'] if decision == "BUY" else price_info['bid']
+                sl = wave0  # Wave 0 = the exact Elliott invalidation level
+                tp = calculate_fibonacci_extension(wave0, wave1, extension_ratio)  # Wave 3 target
 
-            sl = round(sl, symbol_info.digits)
-            tp = round(tp, symbol_info.digits)
+                sl = round(sl, symbol_info.digits)
+                tp = round(tp, symbol_info.digits)
 
-            sl_dist = abs(entry_price - sl)
-            tp_dist = abs(tp - entry_price)
-            if sl_dist <= 0:
-                print(f"[ELLIOTT WAVE] {symbol} rejected: Stop Loss at or ahead of entry price.")
-                continue
+                sl_dist = abs(entry_price - sl)
+                tp_dist = abs(tp - entry_price)
+                if sl_dist <= 0:
+                    print(f"[ELLIOTT WAVE] {symbol} ({timeframe_str}) rejected: Stop Loss at or ahead of entry price.")
+                    continue
 
-            rr_ratio = tp_dist / sl_dist
-            if rr_ratio < min_rr_ratio:
-                print(f"[ELLIOTT WAVE] {symbol} rejected: R:R 1:{rr_ratio:.2f} below strategy floor 1:{min_rr_ratio:.2f}.")
-                continue
+                rr_ratio = tp_dist / sl_dist
+                if rr_ratio < min_rr_ratio:
+                    print(f"[ELLIOTT WAVE] {symbol} ({timeframe_str}) rejected: R:R 1:{rr_ratio:.2f} below strategy floor 1:{min_rr_ratio:.2f}.")
+                    continue
 
-            volume = calculate_lot_size(symbol, sl, entry_price, risk_percent=risk_percent)
-            reason_msg = (
-                f"Elliott Wave: Wave 2 retracement {setup['retracement_pct']:.1f}% of Wave 1 "
-                f"(A={wave0:.5f}, B={wave1:.5f}, C={wave2:.5f}) — targeting Wave 3 extension at {tp:.5f}."
-            )
-            wave_context = {
-                "type": decision, "A": wave0, "B": wave1, "C": wave2,
-                "retracement_pct": setup["retracement_pct"], "extension_ratio": extension_ratio,
-                "time_A": setup.get("time_A"), "time_B": setup.get("time_B"), "time_C": setup.get("time_C")
-            }
-
-            if not auto_trade_enabled:
-                print(f"[ELLIOTT WAVE] Signal-Only Mode: {decision} on {symbol} at {entry_price} (SL: {sl}, TP: {tp}). Not executed.")
-                last_scan_reports[f"{symbol}_elliott"] = {
-                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
-                    "status": "Signal Only (Elliott)",
-                    "details": reason_msg,
-                    "structure": wave_context
+                volume = calculate_lot_size(symbol, sl, entry_price, risk_percent=risk_percent)
+                reason_msg = (
+                    f"Elliott Wave ({timeframe_str}): Wave 2 retracement {setup['retracement_pct']:.1f}% of Wave 1 "
+                    f"(A={wave0:.5f}, B={wave1:.5f}, C={wave2:.5f}) — targeting Wave 3 extension at {tp:.5f}."
+                )
+                wave_context = {
+                    "type": decision, "A": wave0, "B": wave1, "C": wave2,
+                    "retracement_pct": setup["retracement_pct"], "extension_ratio": extension_ratio,
+                    "time_A": setup.get("time_A"), "time_B": setup.get("time_B"), "time_C": setup.get("time_C"),
+                    "timeframe": timeframe_str
                 }
-                continue
 
-            trade_res = open_trade(
-                action=decision,
-                symbol=symbol,
-                volume=volume,
-                sl=sl,
-                tp=tp,
-                magic=MAGIC_NUMBER,
-                comment=f"Elliott Wave {decision}"[:28]
-            )
+                if not auto_trade_enabled:
+                    print(f"[ELLIOTT WAVE] Signal-Only Mode: {decision} on {symbol} ({timeframe_str}) at {entry_price} (SL: {sl}, TP: {tp}). Not executed.")
+                    last_scan_reports[f"{symbol}_elliott_{timeframe_str}"] = {
+                        "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                        "status": "Signal Only (Elliott)",
+                        "details": reason_msg,
+                        "structure": wave_context
+                    }
+                    continue
 
-            if trade_res and trade_res["success"]:
-                log_trade_open(
-                    ticket=trade_res["ticket"],
-                    symbol=symbol,
+                trade_res = open_trade(
                     action=decision,
+                    symbol=symbol,
                     volume=volume,
-                    entry_price=trade_res["price"],
                     sl=sl,
                     tp=tp,
-                    reason=reason_msg,
-                    gann_data=wave_context
+                    magic=MAGIC_NUMBER,
+                    comment=f"Elliott Wave {decision}"[:28]
                 )
-                print(f"[ELLIOTT WAVE] Executed {decision} {volume} lots on {symbol} at {trade_res['price']} (SL: {sl}, TP: {tp}). Ticket: {trade_res['ticket']}.")
-                last_scan_reports[f"{symbol}_elliott"] = {
-                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
-                    "status": f"Executed {decision} (Elliott)",
-                    "details": reason_msg,
-                    "structure": wave_context
-                }
 
-                entry_time_str = time.strftime('%Y-%m-%d %H:%M:%S')
-                screenshot_url = None
-                try:
-                    from chart_generator import generate_chart_screenshot
-                    from db_manager import update_trade_screenshot
-
-                    screenshot_url = generate_chart_screenshot(
-                        symbol=symbol,
-                        ticket=trade_res["ticket"],
-                        entry_price=trade_res["price"],
-                        sl_price=sl,
-                        tp_price=tp,
-                        gann_data=wave_context,
-                        timeframe_str=DEFAULT_TIMEFRAME,
-                        entry_time_str=entry_time_str,
-                        strategy_label="Elliott Wave"
-                    )
-                    update_trade_screenshot(trade_res["ticket"], screenshot_url)
-                    print(f"[SCREENSHOT] Saved Elliott Wave trade chart to {screenshot_url}")
-                except Exception as ex:
-                    print(f"[SCREENSHOT] [ERROR] Failed to save Elliott Wave screenshot: {ex}")
-
-                try:
-                    from telegram_notifier import notify_trade_open
-                    from db_manager import update_trade_telegram_msg_id
-                    msg_id = notify_trade_open(
+                if trade_res and trade_res["success"]:
+                    log_trade_open(
                         ticket=trade_res["ticket"],
                         symbol=symbol,
                         action=decision,
@@ -1543,17 +1532,62 @@ def manage_elliott_wave_strategy(settings, active_news_events, risk_percent, aut
                         sl=sl,
                         tp=tp,
                         reason=reason_msg,
-                        screenshot_url=screenshot_url
+                        gann_data=wave_context
                     )
-                    if msg_id:
-                        update_trade_telegram_msg_id(trade_res["ticket"], msg_id)
-                        print(f"[TELEGRAM] Elliott Wave trade open notification sent (Msg ID: {msg_id})")
-                except Exception as tg_ex:
-                    print(f"[TELEGRAM] [ERROR] Failed to send Elliott Wave open alert: {tg_ex}")
-            else:
-                print(f"[ELLIOTT WAVE] [ERROR] Failed to execute trade order for {symbol}.")
-        except Exception as elliott_ex:
-            print(f"[ELLIOTT WAVE] [ERROR] {symbol}: {elliott_ex}")
+                    print(f"[ELLIOTT WAVE] Executed {decision} {volume} lots on {symbol} ({timeframe_str}) at {trade_res['price']} (SL: {sl}, TP: {tp}). Ticket: {trade_res['ticket']}.")
+                    last_scan_reports[f"{symbol}_elliott_{timeframe_str}"] = {
+                        "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                        "status": f"Executed {decision} (Elliott)",
+                        "details": reason_msg,
+                        "structure": wave_context
+                    }
+
+                    entry_time_str = time.strftime('%Y-%m-%d %H:%M:%S')
+                    screenshot_url = None
+                    try:
+                        from chart_generator import generate_chart_screenshot
+                        from db_manager import update_trade_screenshot
+
+                        screenshot_url = generate_chart_screenshot(
+                            symbol=symbol,
+                            ticket=trade_res["ticket"],
+                            entry_price=trade_res["price"],
+                            sl_price=sl,
+                            tp_price=tp,
+                            gann_data=wave_context,
+                            timeframe_str=timeframe_str,
+                            entry_time_str=entry_time_str,
+                            strategy_label="Elliott Wave"
+                        )
+                        update_trade_screenshot(trade_res["ticket"], screenshot_url)
+                        print(f"[SCREENSHOT] Saved Elliott Wave trade chart to {screenshot_url}")
+                    except Exception as ex:
+                        print(f"[SCREENSHOT] [ERROR] Failed to save Elliott Wave screenshot: {ex}")
+
+                    try:
+                        from telegram_notifier import notify_trade_open
+                        from db_manager import update_trade_telegram_msg_id
+                        msg_id = notify_trade_open(
+                            ticket=trade_res["ticket"],
+                            symbol=symbol,
+                            action=decision,
+                            volume=volume,
+                            entry_price=trade_res["price"],
+                            sl=sl,
+                            tp=tp,
+                            reason=reason_msg,
+                            screenshot_url=screenshot_url,
+                            timeframe=timeframe_str
+                        )
+                        if msg_id:
+                            update_trade_telegram_msg_id(trade_res["ticket"], msg_id)
+                            print(f"[TELEGRAM] Elliott Wave trade open notification sent (Msg ID: {msg_id})")
+                    except Exception as tg_ex:
+                        print(f"[TELEGRAM] [ERROR] Failed to send Elliott Wave open alert: {tg_ex}")
+                else:
+                    print(f"[ELLIOTT WAVE] [ERROR] Failed to execute trade order for {symbol} ({timeframe_str}).")
+            except Exception as elliott_ex:
+                print(f"[ELLIOTT WAVE] [ERROR] {symbol} ({timeframe_str}): {elliott_ex}")
 
 
 def manage_range_trading_strategy(settings, active_news_events, risk_percent, auto_trade_enabled):
@@ -1568,6 +1602,11 @@ def manage_range_trading_strategy(settings, active_news_events, risk_percent, au
 
     Left disabled by default (range_trading_enabled defaults to "0") — this
     is a new, unvalidated strategy on a live account; see backtest_range_trading.py.
+
+    Scans every symbol across every configured timeframe (`scan_timeframes`)
+    each cycle — a position is still capped at one per symbol per strategy
+    regardless of which timeframe triggers it (the duplicate-direction guard
+    below is timeframe-agnostic by design).
     """
     if int(settings.get("range_trading_enabled", 0)) != 1:
         return
@@ -1590,192 +1629,152 @@ def manage_range_trading_strategy(settings, active_news_events, risk_percent, au
     rsi_oversold = float(settings.get("range_trading_rsi_oversold", 35.0))
     min_rr_ratio = float(settings.get("range_trading_min_rr_ratio", 1.0))
     min_tp_spread_multiple = float(settings.get("range_trading_min_tp_spread_multiple", 2.0))
+    scan_timeframes = settings.get("scan_timeframes", [DEFAULT_TIMEFRAME])
 
     for symbol in range_symbols:
-        try:
-            # News freeze check (reuses the same events computed once per cycle)
-            if any(event["currency"].upper() in symbol.upper() for event in active_news_events):
-                continue
+        for timeframe_str in scan_timeframes:
+            try:
+                # News freeze check (reuses the same events computed once per cycle)
+                if any(event["currency"].upper() in symbol.upper() for event in active_news_events):
+                    continue
 
-            candles_df = get_candles(symbol=symbol, timeframe=get_timeframe(DEFAULT_TIMEFRAME), count=lookback + 100)
-            if candles_df is None or len(candles_df) < 20:
-                continue
-            candles_df = candles_df.reset_index(drop=True)
+                candles_df = get_candles(symbol=symbol, timeframe=get_timeframe(timeframe_str), count=lookback + 100)
+                if candles_df is None or len(candles_df) < 20:
+                    continue
+                candles_df = candles_df.reset_index(drop=True)
 
-            range_info = detect_range_zone(
-                candles_df, lookback=lookback, window=swing_window,
-                peak_tolerance_pct=peak_tolerance_pct, trough_tolerance_pct=trough_tolerance_pct,
-                min_range_pct=min_range_pct, max_range_pct=max_range_pct
-            )
-            if not range_info:
-                continue
+                range_info = detect_range_zone(
+                    candles_df, lookback=lookback, window=swing_window,
+                    peak_tolerance_pct=peak_tolerance_pct, trough_tolerance_pct=trough_tolerance_pct,
+                    min_range_pct=min_range_pct, max_range_pct=max_range_pct
+                )
+                if not range_info:
+                    continue
 
-            price_info = get_current_price(symbol)
-            if not price_info:
-                continue
-            mid_price = (price_info['bid'] + price_info['ask']) / 2.0
+                price_info = get_current_price(symbol)
+                if not price_info:
+                    continue
+                mid_price = (price_info['bid'] + price_info['ask']) / 2.0
 
-            decision, reason, context = check_range_trading_signal(
-                candles_df, mid_price, range_info,
-                adx_period=adx_period, adx_threshold=adx_threshold, entry_zone_pct=entry_zone_pct,
-                rsi_overbought=rsi_overbought, rsi_oversold=rsi_oversold, atr_period=atr_period
-            )
-            if decision == "HOLD":
-                continue
+                decision, reason, context = check_range_trading_signal(
+                    candles_df, mid_price, range_info,
+                    adx_period=adx_period, adx_threshold=adx_threshold, entry_zone_pct=entry_zone_pct,
+                    rsi_overbought=rsi_overbought, rsi_oversold=rsi_oversold, atr_period=atr_period
+                )
+                if decision == "HOLD":
+                    continue
 
-            mode = context["mode"]
-            mode_tag = "BO" if mode == "breakout" else "Fade"
+                mode = context["mode"]
+                mode_tag = "BO" if mode == "breakout" else "Fade"
 
-            # Duplicate same-direction entry guard
-            symbol_positions = [
-                pos for pos in get_open_positions()
-                if pos.magic == MAGIC_NUMBER and pos.symbol == symbol and "range" in (pos.comment or "").lower()
-            ]
-            pos_type_str_map = {0: "BUY", 1: "SELL"}
-            if any(pos_type_str_map.get(pos.type) == decision for pos in symbol_positions):
-                continue
+                # Duplicate same-direction entry guard
+                symbol_positions = [
+                    pos for pos in get_open_positions()
+                    if pos.magic == MAGIC_NUMBER and pos.symbol == symbol and "range" in (pos.comment or "").lower()
+                ]
+                pos_type_str_map = {0: "BUY", 1: "SELL"}
+                if any(pos_type_str_map.get(pos.type) == decision for pos in symbol_positions):
+                    continue
 
-            # Stop-loss cooldown reuse (no Gann-specific setup context here)
-            if is_setup_stopped_out(symbol, None, decision):
-                continue
+                # Stop-loss cooldown reuse (no Gann-specific setup context here)
+                if is_setup_stopped_out(symbol, None, decision):
+                    continue
 
-            symbol_info = mt5.symbol_info(symbol)
-            if not symbol_info:
-                continue
+                symbol_info = mt5.symbol_info(symbol)
+                if not symbol_info:
+                    continue
 
-            entry_price = price_info['ask'] if decision == "BUY" else price_info['bid']
-            range_top = context["range_top"]
-            range_bottom = context["range_bottom"]
-            range_width = range_top - range_bottom
-            atr = context.get("atr") or 0.0
+                entry_price = price_info['ask'] if decision == "BUY" else price_info['bid']
+                range_top = context["range_top"]
+                range_bottom = context["range_bottom"]
+                range_width = range_top - range_bottom
+                atr = context.get("atr") or 0.0
 
-            # SL is unified by direction regardless of mode — a breakout BUY's
-            # SL sits at the far/opposite side of the range (deliberately wide),
-            # the exact same level a fade BUY near that boundary would use anyway.
-            if decision == "BUY":
-                sl = range_bottom - atr * atr_sl_multiplier
-            else:
-                sl = range_top + atr * atr_sl_multiplier
-
-            # TP is mode-dependent: fade targets the opposite boundary pulled in
-            # by a fill-probability buffer (MT5 fills at bid/ask, not the
-            # mid-price the range was computed from); breakout targets a
-            # measured-move projection of the range width.
-            if mode == "fade":
+                # SL is unified by direction regardless of mode — a breakout BUY's
+                # SL sits at the far/opposite side of the range (deliberately wide),
+                # the exact same level a fade BUY near that boundary would use anyway.
                 if decision == "BUY":
-                    tp = range_top - range_width * (tp_buffer_pct / 100.0)
+                    sl = range_bottom - atr * atr_sl_multiplier
                 else:
-                    tp = range_bottom + range_width * (tp_buffer_pct / 100.0)
-            else:
-                if decision == "BUY":
-                    tp = range_top + range_width * breakout_tp_multiplier
+                    sl = range_top + atr * atr_sl_multiplier
+
+                # TP is mode-dependent: fade targets the opposite boundary pulled in
+                # by a fill-probability buffer (MT5 fills at bid/ask, not the
+                # mid-price the range was computed from); breakout targets a
+                # measured-move projection of the range width.
+                if mode == "fade":
+                    if decision == "BUY":
+                        tp = range_top - range_width * (tp_buffer_pct / 100.0)
+                    else:
+                        tp = range_bottom + range_width * (tp_buffer_pct / 100.0)
                 else:
-                    tp = range_bottom - range_width * breakout_tp_multiplier
+                    if decision == "BUY":
+                        tp = range_top + range_width * breakout_tp_multiplier
+                    else:
+                        tp = range_bottom - range_width * breakout_tp_multiplier
 
-            sl = round(sl, symbol_info.digits)
-            tp = round(tp, symbol_info.digits)
+                sl = round(sl, symbol_info.digits)
+                tp = round(tp, symbol_info.digits)
 
-            # TP must actually sit on the profitable side of entry — a breakout
-            # entry can occur well beyond range_top/range_bottom on a strong move,
-            # so a measured-move TP computed purely from the boundary can land
-            # behind entry (abs(tp-entry) would still look like a positive R:R).
-            if decision == "BUY" and tp <= entry_price:
-                print(f"[RANGE TRADING] {symbol} rejected: TP ({tp}) is not ahead of entry ({entry_price}) for a BUY.")
-                continue
-            if decision == "SELL" and tp >= entry_price:
-                print(f"[RANGE TRADING] {symbol} rejected: TP ({tp}) is not ahead of entry ({entry_price}) for a SELL.")
-                continue
+                # TP must actually sit on the profitable side of entry — a breakout
+                # entry can occur well beyond range_top/range_bottom on a strong move,
+                # so a measured-move TP computed purely from the boundary can land
+                # behind entry (abs(tp-entry) would still look like a positive R:R).
+                if decision == "BUY" and tp <= entry_price:
+                    print(f"[RANGE TRADING] {symbol} ({timeframe_str}) rejected: TP ({tp}) is not ahead of entry ({entry_price}) for a BUY.")
+                    continue
+                if decision == "SELL" and tp >= entry_price:
+                    print(f"[RANGE TRADING] {symbol} ({timeframe_str}) rejected: TP ({tp}) is not ahead of entry ({entry_price}) for a SELL.")
+                    continue
 
-            sl_dist = abs(entry_price - sl)
-            tp_dist = abs(tp - entry_price)
-            if sl_dist <= 0:
-                print(f"[RANGE TRADING] {symbol} rejected: Stop Loss at or ahead of entry price.")
-                continue
+                sl_dist = abs(entry_price - sl)
+                tp_dist = abs(tp - entry_price)
+                if sl_dist <= 0:
+                    print(f"[RANGE TRADING] {symbol} ({timeframe_str}) rejected: Stop Loss at or ahead of entry price.")
+                    continue
 
-            # Spread guard: same rationale as SMA5 — MT5 closes a BUY at Bid and
-            # a SELL at Ask, not the mid-price the range/TP levels were computed from.
-            spread = price_info['ask'] - price_info['bid']
-            if tp_dist < spread * min_tp_spread_multiple:
-                print(f"[RANGE TRADING] {symbol} rejected: TP distance ({tp_dist:.5f}) too small relative to spread ({spread:.5f}).")
-                continue
+                # Spread guard: same rationale as SMA5 — MT5 closes a BUY at Bid and
+                # a SELL at Ask, not the mid-price the range/TP levels were computed from.
+                spread = price_info['ask'] - price_info['bid']
+                if tp_dist < spread * min_tp_spread_multiple:
+                    print(f"[RANGE TRADING] {symbol} ({timeframe_str}) rejected: TP distance ({tp_dist:.5f}) too small relative to spread ({spread:.5f}).")
+                    continue
 
-            rr_ratio = tp_dist / sl_dist
-            if rr_ratio < min_rr_ratio:
-                print(f"[RANGE TRADING] {symbol} rejected: R:R 1:{rr_ratio:.2f} below strategy floor 1:{min_rr_ratio:.2f}.")
-                continue
+                rr_ratio = tp_dist / sl_dist
+                if rr_ratio < min_rr_ratio:
+                    print(f"[RANGE TRADING] {symbol} ({timeframe_str}) rejected: R:R 1:{rr_ratio:.2f} below strategy floor 1:{min_rr_ratio:.2f}.")
+                    continue
 
-            volume = calculate_lot_size(symbol, sl, entry_price, risk_percent=risk_percent)
-            reason_msg = f"Range Trading ({mode.capitalize()}): {reason}"
-            range_context = {
-                "type": decision, "mode": mode,
-                "range_top": range_top, "range_bottom": range_bottom,
-                "adx": context.get("adx")
-            }
-
-            if not auto_trade_enabled:
-                print(f"[RANGE TRADING] Signal-Only Mode: {decision} on {symbol} at {entry_price} (SL: {sl}, TP: {tp}). Not executed.")
-                last_scan_reports[f"{symbol}_range"] = {
-                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
-                    "status": "Signal Only (Range)",
-                    "details": reason_msg,
-                    "structure": range_context
+                volume = calculate_lot_size(symbol, sl, entry_price, risk_percent=risk_percent)
+                reason_msg = f"Range Trading ({mode.capitalize()}, {timeframe_str}): {reason}"
+                range_context = {
+                    "type": decision, "mode": mode,
+                    "range_top": range_top, "range_bottom": range_bottom,
+                    "adx": context.get("adx"), "timeframe": timeframe_str
                 }
-                continue
 
-            trade_res = open_trade(
-                action=decision,
-                symbol=symbol,
-                volume=volume,
-                sl=sl,
-                tp=tp,
-                magic=MAGIC_NUMBER,
-                comment=f"Range {mode_tag} {decision}"[:28]
-            )
+                if not auto_trade_enabled:
+                    print(f"[RANGE TRADING] Signal-Only Mode: {decision} on {symbol} ({timeframe_str}) at {entry_price} (SL: {sl}, TP: {tp}). Not executed.")
+                    last_scan_reports[f"{symbol}_range_{timeframe_str}"] = {
+                        "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                        "status": "Signal Only (Range)",
+                        "details": reason_msg,
+                        "structure": range_context
+                    }
+                    continue
 
-            if trade_res and trade_res["success"]:
-                log_trade_open(
-                    ticket=trade_res["ticket"],
-                    symbol=symbol,
+                trade_res = open_trade(
                     action=decision,
+                    symbol=symbol,
                     volume=volume,
-                    entry_price=trade_res["price"],
                     sl=sl,
                     tp=tp,
-                    reason=reason_msg,
-                    gann_data=range_context
+                    magic=MAGIC_NUMBER,
+                    comment=f"Range {mode_tag} {decision}"[:28]
                 )
-                print(f"[RANGE TRADING] Executed {decision} {volume} lots on {symbol} at {trade_res['price']} (SL: {sl}, TP: {tp}). Ticket: {trade_res['ticket']}.")
-                last_scan_reports[f"{symbol}_range"] = {
-                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
-                    "status": f"Executed {decision} (Range {mode_tag})",
-                    "details": reason_msg,
-                    "structure": range_context
-                }
 
-                entry_time_str = time.strftime('%Y-%m-%d %H:%M:%S')
-                screenshot_url = None
-                try:
-                    from chart_generator import generate_chart_screenshot
-                    from db_manager import update_trade_screenshot
-
-                    screenshot_url = generate_chart_screenshot(
-                        symbol=symbol,
-                        ticket=trade_res["ticket"],
-                        entry_price=trade_res["price"],
-                        sl_price=sl,
-                        tp_price=tp,
-                        timeframe_str=DEFAULT_TIMEFRAME,
-                        entry_time_str=entry_time_str
-                    )
-                    update_trade_screenshot(trade_res["ticket"], screenshot_url)
-                    print(f"[SCREENSHOT] Saved Range Trading chart to {screenshot_url}")
-                except Exception as ex:
-                    print(f"[SCREENSHOT] [ERROR] Failed to save Range Trading screenshot: {ex}")
-
-                try:
-                    from telegram_notifier import notify_trade_open
-                    from db_manager import update_trade_telegram_msg_id
-                    msg_id = notify_trade_open(
+                if trade_res and trade_res["success"]:
+                    log_trade_open(
                         ticket=trade_res["ticket"],
                         symbol=symbol,
                         action=decision,
@@ -1784,17 +1783,60 @@ def manage_range_trading_strategy(settings, active_news_events, risk_percent, au
                         sl=sl,
                         tp=tp,
                         reason=reason_msg,
-                        screenshot_url=screenshot_url
+                        gann_data=range_context
                     )
-                    if msg_id:
-                        update_trade_telegram_msg_id(trade_res["ticket"], msg_id)
-                        print(f"[TELEGRAM] Range Trading trade open notification sent (Msg ID: {msg_id})")
-                except Exception as tg_ex:
-                    print(f"[TELEGRAM] [ERROR] Failed to send Range Trading open alert: {tg_ex}")
-            else:
-                print(f"[RANGE TRADING] [ERROR] Failed to execute trade order for {symbol}.")
-        except Exception as range_ex:
-            print(f"[RANGE TRADING] [ERROR] {symbol}: {range_ex}")
+                    print(f"[RANGE TRADING] Executed {decision} {volume} lots on {symbol} ({timeframe_str}) at {trade_res['price']} (SL: {sl}, TP: {tp}). Ticket: {trade_res['ticket']}.")
+                    last_scan_reports[f"{symbol}_range_{timeframe_str}"] = {
+                        "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                        "status": f"Executed {decision} (Range {mode_tag})",
+                        "details": reason_msg,
+                        "structure": range_context
+                    }
+
+                    entry_time_str = time.strftime('%Y-%m-%d %H:%M:%S')
+                    screenshot_url = None
+                    try:
+                        from chart_generator import generate_chart_screenshot
+                        from db_manager import update_trade_screenshot
+
+                        screenshot_url = generate_chart_screenshot(
+                            symbol=symbol,
+                            ticket=trade_res["ticket"],
+                            entry_price=trade_res["price"],
+                            sl_price=sl,
+                            tp_price=tp,
+                            timeframe_str=timeframe_str,
+                            entry_time_str=entry_time_str
+                        )
+                        update_trade_screenshot(trade_res["ticket"], screenshot_url)
+                        print(f"[SCREENSHOT] Saved Range Trading chart to {screenshot_url}")
+                    except Exception as ex:
+                        print(f"[SCREENSHOT] [ERROR] Failed to save Range Trading screenshot: {ex}")
+
+                    try:
+                        from telegram_notifier import notify_trade_open
+                        from db_manager import update_trade_telegram_msg_id
+                        msg_id = notify_trade_open(
+                            ticket=trade_res["ticket"],
+                            symbol=symbol,
+                            action=decision,
+                            volume=volume,
+                            entry_price=trade_res["price"],
+                            sl=sl,
+                            tp=tp,
+                            reason=reason_msg,
+                            screenshot_url=screenshot_url,
+                            timeframe=timeframe_str
+                        )
+                        if msg_id:
+                            update_trade_telegram_msg_id(trade_res["ticket"], msg_id)
+                            print(f"[TELEGRAM] Range Trading trade open notification sent (Msg ID: {msg_id})")
+                    except Exception as tg_ex:
+                        print(f"[TELEGRAM] [ERROR] Failed to send Range Trading open alert: {tg_ex}")
+                else:
+                    print(f"[RANGE TRADING] [ERROR] Failed to execute trade order for {symbol} ({timeframe_str}).")
+            except Exception as range_ex:
+                print(f"[RANGE TRADING] [ERROR] {symbol} ({timeframe_str}): {range_ex}")
 
 
 def manage_harmonic_patterns_strategy(settings, active_news_events, risk_percent, auto_trade_enabled):
@@ -1815,6 +1857,11 @@ def manage_harmonic_patterns_strategy(settings, active_news_events, risk_percent
     Left disabled by default (harmonic_patterns_enabled defaults to "0") —
     this is a new, unvalidated strategy on a live account; see
     backtest_harmonic_patterns.py.
+
+    Scans every symbol across every configured timeframe (`scan_timeframes`)
+    each cycle — a position is still capped at one per symbol per strategy
+    regardless of which timeframe triggers it (the duplicate-direction guard
+    below is timeframe-agnostic by design).
     """
     if int(settings.get("harmonic_patterns_enabled", 0)) != 1:
         return
@@ -1833,188 +1880,148 @@ def manage_harmonic_patterns_strategy(settings, active_news_events, risk_percent
     rsi_oversold = float(settings.get("harmonic_patterns_rsi_oversold", 35.0))
     min_rr_ratio = float(settings.get("harmonic_patterns_min_rr_ratio", 1.0))
     min_tp_spread_multiple = float(settings.get("harmonic_patterns_min_tp_spread_multiple", 2.0))
+    scan_timeframes = settings.get("scan_timeframes", [DEFAULT_TIMEFRAME])
 
     for symbol in harmonic_symbols:
-        try:
-            if any(event["currency"].upper() in symbol.upper() for event in active_news_events):
-                continue
+        for timeframe_str in scan_timeframes:
+            try:
+                if any(event["currency"].upper() in symbol.upper() for event in active_news_events):
+                    continue
 
-            candles_df = get_candles(symbol=symbol, timeframe=get_timeframe(DEFAULT_TIMEFRAME), count=lookback + 100)
-            if candles_df is None or len(candles_df) < 20:
-                continue
-            candles_df = candles_df.reset_index(drop=True)
+                candles_df = get_candles(symbol=symbol, timeframe=get_timeframe(timeframe_str), count=lookback + 100)
+                if candles_df is None or len(candles_df) < 20:
+                    continue
+                candles_df = candles_df.reset_index(drop=True)
 
-            pattern_info = detect_harmonic_pattern(
-                candles_df, lookback=lookback, window=swing_window, patterns=pattern_types,
-                ratio_tolerance_pct=ratio_tolerance_pct, prz_confluence_pct=prz_confluence_pct
-            )
-            if not pattern_info:
-                continue
+                pattern_info = detect_harmonic_pattern(
+                    candles_df, lookback=lookback, window=swing_window, patterns=pattern_types,
+                    ratio_tolerance_pct=ratio_tolerance_pct, prz_confluence_pct=prz_confluence_pct
+                )
+                if not pattern_info:
+                    continue
 
-            # Freshness: C must have completed recently, not ancient history
-            # (same convention as Elliott Wave's idx_C freshness gate, given a
-            # slightly longer leash since D can take a bit longer to complete)
-            last_idx = len(candles_df) - 1
-            if last_idx - pattern_info["idx_C"] > 10:
-                continue
+                # Freshness: C must have completed recently, not ancient history
+                # (same convention as Elliott Wave's idx_C freshness gate, given a
+                # slightly longer leash since D can take a bit longer to complete)
+                last_idx = len(candles_df) - 1
+                if last_idx - pattern_info["idx_C"] > 10:
+                    continue
 
-            price_info = get_current_price(symbol)
-            if not price_info:
-                continue
-            mid_price = (price_info['bid'] + price_info['ask']) / 2.0
+                price_info = get_current_price(symbol)
+                if not price_info:
+                    continue
+                mid_price = (price_info['bid'] + price_info['ask']) / 2.0
 
-            decision, reason, context = check_harmonic_pattern_signal(
-                candles_df, mid_price, pattern_info,
-                entry_zone_pct=entry_zone_pct, rsi_overbought=rsi_overbought,
-                rsi_oversold=rsi_oversold, atr_period=atr_period
-            )
-            if decision == "HOLD":
-                continue
+                decision, reason, context = check_harmonic_pattern_signal(
+                    candles_df, mid_price, pattern_info,
+                    entry_zone_pct=entry_zone_pct, rsi_overbought=rsi_overbought,
+                    rsi_oversold=rsi_oversold, atr_period=atr_period
+                )
+                if decision == "HOLD":
+                    continue
 
-            pattern_name = context["pattern"]
+                pattern_name = context["pattern"]
 
-            # Duplicate same-direction entry guard
-            symbol_positions = [
-                pos for pos in get_open_positions()
-                if pos.magic == MAGIC_NUMBER and pos.symbol == symbol and "harmonic" in (pos.comment or "").lower()
-            ]
-            pos_type_str_map = {0: "BUY", 1: "SELL"}
-            if any(pos_type_str_map.get(pos.type) == decision for pos in symbol_positions):
-                continue
+                # Duplicate same-direction entry guard
+                symbol_positions = [
+                    pos for pos in get_open_positions()
+                    if pos.magic == MAGIC_NUMBER and pos.symbol == symbol and "harmonic" in (pos.comment or "").lower()
+                ]
+                pos_type_str_map = {0: "BUY", 1: "SELL"}
+                if any(pos_type_str_map.get(pos.type) == decision for pos in symbol_positions):
+                    continue
 
-            # Stop-loss cooldown reuse (no Gann-specific setup context here)
-            if is_setup_stopped_out(symbol, None, decision):
-                continue
+                # Stop-loss cooldown reuse (no Gann-specific setup context here)
+                if is_setup_stopped_out(symbol, None, decision):
+                    continue
 
-            symbol_info = mt5.symbol_info(symbol)
-            if not symbol_info:
-                continue
+                symbol_info = mt5.symbol_info(symbol)
+                if not symbol_info:
+                    continue
 
-            entry_price = price_info['ask'] if decision == "BUY" else price_info['bid']
-            point_X = context["X"]
-            point_C = context["C"]
-            prz_price = context["prz_price"]
-            atr = context.get("atr") or 0.0
+                entry_price = price_info['ask'] if decision == "BUY" else price_info['bid']
+                point_X = context["X"]
+                point_C = context["C"]
+                prz_price = context["prz_price"]
+                atr = context.get("atr") or 0.0
 
-            # SL sits beyond X — the standard harmonic invalidation level, ATR-buffered
-            if decision == "BUY":
-                sl = point_X - atr * atr_sl_multiplier
-            else:
-                sl = point_X + atr * atr_sl_multiplier
+                # SL sits beyond X — the standard harmonic invalidation level, ATR-buffered
+                if decision == "BUY":
+                    sl = point_X - atr * atr_sl_multiplier
+                else:
+                    sl = point_X + atr * atr_sl_multiplier
 
-            # TP: a single Fibonacci retracement of the C->D leg back toward C
-            # (harmonic trading often ladders 3 partial targets; this bot has
-            # no partial-close infrastructure anywhere, so — like every other
-            # strategy here — this uses one single TP)
-            if decision == "BUY":
-                tp = prz_price + tp_retracement_ratio * (point_C - prz_price)
-            else:
-                tp = prz_price - tp_retracement_ratio * (prz_price - point_C)
+                # TP: a single Fibonacci retracement of the C->D leg back toward C
+                # (harmonic trading often ladders 3 partial targets; this bot has
+                # no partial-close infrastructure anywhere, so — like every other
+                # strategy here — this uses one single TP)
+                if decision == "BUY":
+                    tp = prz_price + tp_retracement_ratio * (point_C - prz_price)
+                else:
+                    tp = prz_price - tp_retracement_ratio * (prz_price - point_C)
 
-            sl = round(sl, symbol_info.digits)
-            tp = round(tp, symbol_info.digits)
+                sl = round(sl, symbol_info.digits)
+                tp = round(tp, symbol_info.digits)
 
-            # TP must actually sit on the profitable side of entry (defense in
-            # depth — same class of bug found and fixed in Range Trading/Classical
-            # Patterns; lower risk here since entry is anchored close to the PRZ,
-            # but cheap to guard against regardless).
-            if decision == "BUY" and tp <= entry_price:
-                print(f"[HARMONIC] {symbol} rejected: TP ({tp}) is not ahead of entry ({entry_price}) for a BUY.")
-                continue
-            if decision == "SELL" and tp >= entry_price:
-                print(f"[HARMONIC] {symbol} rejected: TP ({tp}) is not ahead of entry ({entry_price}) for a SELL.")
-                continue
+                # TP must actually sit on the profitable side of entry (defense in
+                # depth — same class of bug found and fixed in Range Trading/Classical
+                # Patterns; lower risk here since entry is anchored close to the PRZ,
+                # but cheap to guard against regardless).
+                if decision == "BUY" and tp <= entry_price:
+                    print(f"[HARMONIC] {symbol} ({timeframe_str}) rejected: TP ({tp}) is not ahead of entry ({entry_price}) for a BUY.")
+                    continue
+                if decision == "SELL" and tp >= entry_price:
+                    print(f"[HARMONIC] {symbol} ({timeframe_str}) rejected: TP ({tp}) is not ahead of entry ({entry_price}) for a SELL.")
+                    continue
 
-            sl_dist = abs(entry_price - sl)
-            tp_dist = abs(tp - entry_price)
-            if sl_dist <= 0:
-                print(f"[HARMONIC] {symbol} rejected: Stop Loss at or ahead of entry price.")
-                continue
+                sl_dist = abs(entry_price - sl)
+                tp_dist = abs(tp - entry_price)
+                if sl_dist <= 0:
+                    print(f"[HARMONIC] {symbol} ({timeframe_str}) rejected: Stop Loss at or ahead of entry price.")
+                    continue
 
-            # Spread guard: same rationale as SMA5/Range Trading — MT5 closes a
-            # BUY at Bid and a SELL at Ask, not the mid-price the PRZ/TP were computed from.
-            spread = price_info['ask'] - price_info['bid']
-            if tp_dist < spread * min_tp_spread_multiple:
-                print(f"[HARMONIC] {symbol} rejected: TP distance ({tp_dist:.5f}) too small relative to spread ({spread:.5f}).")
-                continue
+                # Spread guard: same rationale as SMA5/Range Trading — MT5 closes a
+                # BUY at Bid and a SELL at Ask, not the mid-price the PRZ/TP were computed from.
+                spread = price_info['ask'] - price_info['bid']
+                if tp_dist < spread * min_tp_spread_multiple:
+                    print(f"[HARMONIC] {symbol} ({timeframe_str}) rejected: TP distance ({tp_dist:.5f}) too small relative to spread ({spread:.5f}).")
+                    continue
 
-            rr_ratio = tp_dist / sl_dist
-            if rr_ratio < min_rr_ratio:
-                print(f"[HARMONIC] {symbol} rejected: R:R 1:{rr_ratio:.2f} below strategy floor 1:{min_rr_ratio:.2f}.")
-                continue
+                rr_ratio = tp_dist / sl_dist
+                if rr_ratio < min_rr_ratio:
+                    print(f"[HARMONIC] {symbol} ({timeframe_str}) rejected: R:R 1:{rr_ratio:.2f} below strategy floor 1:{min_rr_ratio:.2f}.")
+                    continue
 
-            volume = calculate_lot_size(symbol, sl, entry_price, risk_percent=risk_percent)
-            reason_msg = f"Harmonic {pattern_name}: {reason}"
-            harmonic_context = {
-                "type": decision, "pattern": pattern_name,
-                "X": point_X, "A": context["A"], "B": context["B"], "C": point_C,
-                "prz_price": prz_price
-            }
-
-            if not auto_trade_enabled:
-                print(f"[HARMONIC] Signal-Only Mode: {decision} on {symbol} at {entry_price} (SL: {sl}, TP: {tp}). Not executed.")
-                last_scan_reports[f"{symbol}_harmonic"] = {
-                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
-                    "status": "Signal Only (Harmonic)",
-                    "details": reason_msg,
-                    "structure": harmonic_context
+                volume = calculate_lot_size(symbol, sl, entry_price, risk_percent=risk_percent)
+                reason_msg = f"Harmonic {pattern_name} ({timeframe_str}): {reason}"
+                harmonic_context = {
+                    "type": decision, "pattern": pattern_name,
+                    "X": point_X, "A": context["A"], "B": context["B"], "C": point_C,
+                    "prz_price": prz_price, "timeframe": timeframe_str
                 }
-                continue
 
-            trade_res = open_trade(
-                action=decision,
-                symbol=symbol,
-                volume=volume,
-                sl=sl,
-                tp=tp,
-                magic=MAGIC_NUMBER,
-                comment=f"Harmonic {pattern_name} {decision}"[:28]
-            )
+                if not auto_trade_enabled:
+                    print(f"[HARMONIC] Signal-Only Mode: {decision} on {symbol} ({timeframe_str}) at {entry_price} (SL: {sl}, TP: {tp}). Not executed.")
+                    last_scan_reports[f"{symbol}_harmonic_{timeframe_str}"] = {
+                        "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                        "status": "Signal Only (Harmonic)",
+                        "details": reason_msg,
+                        "structure": harmonic_context
+                    }
+                    continue
 
-            if trade_res and trade_res["success"]:
-                log_trade_open(
-                    ticket=trade_res["ticket"],
-                    symbol=symbol,
+                trade_res = open_trade(
                     action=decision,
+                    symbol=symbol,
                     volume=volume,
-                    entry_price=trade_res["price"],
                     sl=sl,
                     tp=tp,
-                    reason=reason_msg,
-                    gann_data=harmonic_context
+                    magic=MAGIC_NUMBER,
+                    comment=f"Harmonic {pattern_name} {decision}"[:28]
                 )
-                print(f"[HARMONIC] Executed {decision} {volume} lots on {symbol} at {trade_res['price']} (SL: {sl}, TP: {tp}). Ticket: {trade_res['ticket']}.")
-                last_scan_reports[f"{symbol}_harmonic"] = {
-                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
-                    "status": f"Executed {decision} (Harmonic {pattern_name})",
-                    "details": reason_msg,
-                    "structure": harmonic_context
-                }
 
-                entry_time_str = time.strftime('%Y-%m-%d %H:%M:%S')
-                screenshot_url = None
-                try:
-                    from chart_generator import generate_chart_screenshot
-                    from db_manager import update_trade_screenshot
-
-                    screenshot_url = generate_chart_screenshot(
-                        symbol=symbol,
-                        ticket=trade_res["ticket"],
-                        entry_price=trade_res["price"],
-                        sl_price=sl,
-                        tp_price=tp,
-                        timeframe_str=DEFAULT_TIMEFRAME,
-                        entry_time_str=entry_time_str
-                    )
-                    update_trade_screenshot(trade_res["ticket"], screenshot_url)
-                    print(f"[SCREENSHOT] Saved Harmonic Patterns chart to {screenshot_url}")
-                except Exception as ex:
-                    print(f"[SCREENSHOT] [ERROR] Failed to save Harmonic Patterns screenshot: {ex}")
-
-                try:
-                    from telegram_notifier import notify_trade_open
-                    from db_manager import update_trade_telegram_msg_id
-                    msg_id = notify_trade_open(
+                if trade_res and trade_res["success"]:
+                    log_trade_open(
                         ticket=trade_res["ticket"],
                         symbol=symbol,
                         action=decision,
@@ -2023,17 +2030,60 @@ def manage_harmonic_patterns_strategy(settings, active_news_events, risk_percent
                         sl=sl,
                         tp=tp,
                         reason=reason_msg,
-                        screenshot_url=screenshot_url
+                        gann_data=harmonic_context
                     )
-                    if msg_id:
-                        update_trade_telegram_msg_id(trade_res["ticket"], msg_id)
-                        print(f"[TELEGRAM] Harmonic Patterns trade open notification sent (Msg ID: {msg_id})")
-                except Exception as tg_ex:
-                    print(f"[TELEGRAM] [ERROR] Failed to send Harmonic Patterns open alert: {tg_ex}")
-            else:
-                print(f"[HARMONIC] [ERROR] Failed to execute trade order for {symbol}.")
-        except Exception as harmonic_ex:
-            print(f"[HARMONIC] [ERROR] {symbol}: {harmonic_ex}")
+                    print(f"[HARMONIC] Executed {decision} {volume} lots on {symbol} ({timeframe_str}) at {trade_res['price']} (SL: {sl}, TP: {tp}). Ticket: {trade_res['ticket']}.")
+                    last_scan_reports[f"{symbol}_harmonic_{timeframe_str}"] = {
+                        "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                        "status": f"Executed {decision} (Harmonic {pattern_name})",
+                        "details": reason_msg,
+                        "structure": harmonic_context
+                    }
+
+                    entry_time_str = time.strftime('%Y-%m-%d %H:%M:%S')
+                    screenshot_url = None
+                    try:
+                        from chart_generator import generate_chart_screenshot
+                        from db_manager import update_trade_screenshot
+
+                        screenshot_url = generate_chart_screenshot(
+                            symbol=symbol,
+                            ticket=trade_res["ticket"],
+                            entry_price=trade_res["price"],
+                            sl_price=sl,
+                            tp_price=tp,
+                            timeframe_str=timeframe_str,
+                            entry_time_str=entry_time_str
+                        )
+                        update_trade_screenshot(trade_res["ticket"], screenshot_url)
+                        print(f"[SCREENSHOT] Saved Harmonic Patterns chart to {screenshot_url}")
+                    except Exception as ex:
+                        print(f"[SCREENSHOT] [ERROR] Failed to save Harmonic Patterns screenshot: {ex}")
+
+                    try:
+                        from telegram_notifier import notify_trade_open
+                        from db_manager import update_trade_telegram_msg_id
+                        msg_id = notify_trade_open(
+                            ticket=trade_res["ticket"],
+                            symbol=symbol,
+                            action=decision,
+                            volume=volume,
+                            entry_price=trade_res["price"],
+                            sl=sl,
+                            tp=tp,
+                            reason=reason_msg,
+                            screenshot_url=screenshot_url,
+                            timeframe=timeframe_str
+                        )
+                        if msg_id:
+                            update_trade_telegram_msg_id(trade_res["ticket"], msg_id)
+                            print(f"[TELEGRAM] Harmonic Patterns trade open notification sent (Msg ID: {msg_id})")
+                    except Exception as tg_ex:
+                        print(f"[TELEGRAM] [ERROR] Failed to send Harmonic Patterns open alert: {tg_ex}")
+                else:
+                    print(f"[HARMONIC] [ERROR] Failed to execute trade order for {symbol} ({timeframe_str}).")
+            except Exception as harmonic_ex:
+                print(f"[HARMONIC] [ERROR] {symbol} ({timeframe_str}): {harmonic_ex}")
 
 
 def manage_classical_patterns_strategy(settings, active_news_events, risk_percent, auto_trade_enabled):
@@ -2055,6 +2105,11 @@ def manage_classical_patterns_strategy(settings, active_news_events, risk_percen
     Left disabled by default (classical_patterns_enabled defaults to "0") —
     this is a new, unvalidated strategy on a live account; see
     backtest_classical_patterns.py.
+
+    Scans every symbol across every configured timeframe (`scan_timeframes`)
+    each cycle — a position is still capped at one per symbol per strategy
+    regardless of which timeframe triggers it (the duplicate-direction guard
+    below is timeframe-agnostic by design).
     """
     if int(settings.get("classical_patterns_enabled", 0)) != 1:
         return
@@ -2074,183 +2129,143 @@ def manage_classical_patterns_strategy(settings, active_news_events, risk_percen
     tp_multiplier = float(settings.get("classical_patterns_tp_multiplier", 1.0))
     min_rr_ratio = float(settings.get("classical_patterns_min_rr_ratio", 1.0))
     min_tp_spread_multiple = float(settings.get("classical_patterns_min_tp_spread_multiple", 2.0))
+    scan_timeframes = settings.get("scan_timeframes", [DEFAULT_TIMEFRAME])
 
     for symbol in classical_symbols:
-        try:
-            if any(event["currency"].upper() in symbol.upper() for event in active_news_events):
-                continue
+        for timeframe_str in scan_timeframes:
+            try:
+                if any(event["currency"].upper() in symbol.upper() for event in active_news_events):
+                    continue
 
-            fetch_count = pole_lookback + consolidation_max_bars + 100
-            candles_df = get_candles(symbol=symbol, timeframe=get_timeframe(DEFAULT_TIMEFRAME), count=fetch_count)
-            if candles_df is None or len(candles_df) < 20:
-                continue
-            candles_df = candles_df.reset_index(drop=True)
+                fetch_count = pole_lookback + consolidation_max_bars + 100
+                candles_df = get_candles(symbol=symbol, timeframe=get_timeframe(timeframe_str), count=fetch_count)
+                if candles_df is None or len(candles_df) < 20:
+                    continue
+                candles_df = candles_df.reset_index(drop=True)
 
-            pattern_info = detect_continuation_pattern(
-                candles_df, pole_lookback=pole_lookback, pole_min_move_pct=pole_min_move_pct,
-                pole_min_efficiency=pole_min_efficiency, consolidation_max_bars=consolidation_max_bars,
-                swing_window=swing_window, flat_slope_threshold_pct=flat_slope_threshold_pct
-            )
-            is_continuation = pattern_info is not None
-            if not pattern_info:
-                pattern_info = detect_reversal_pattern(
-                    candles_df, lookback=pole_lookback + consolidation_max_bars, window=swing_window,
-                    shoulder_tolerance_pct=shoulder_tolerance_pct, neckline_tolerance_pct=neckline_tolerance_pct,
-                    patterns=pattern_types
+                pattern_info = detect_continuation_pattern(
+                    candles_df, pole_lookback=pole_lookback, pole_min_move_pct=pole_min_move_pct,
+                    pole_min_efficiency=pole_min_efficiency, consolidation_max_bars=consolidation_max_bars,
+                    swing_window=swing_window, flat_slope_threshold_pct=flat_slope_threshold_pct
                 )
-            if not pattern_info:
-                continue
+                is_continuation = pattern_info is not None
+                if not pattern_info:
+                    pattern_info = detect_reversal_pattern(
+                        candles_df, lookback=pole_lookback + consolidation_max_bars, window=swing_window,
+                        shoulder_tolerance_pct=shoulder_tolerance_pct, neckline_tolerance_pct=neckline_tolerance_pct,
+                        patterns=pattern_types
+                    )
+                if not pattern_info:
+                    continue
 
-            decision, reason, context = check_classical_pattern_signal(candles_df, pattern_info, atr_period=atr_period)
-            if decision == "HOLD":
-                continue
+                decision, reason, context = check_classical_pattern_signal(candles_df, pattern_info, atr_period=atr_period)
+                if decision == "HOLD":
+                    continue
 
-            pattern_name = context["pattern"]
-            level = context["level"]
+                pattern_name = context["pattern"]
+                level = context["level"]
 
-            # Duplicate same-direction entry guard
-            symbol_positions = [
-                pos for pos in get_open_positions()
-                if pos.magic == MAGIC_NUMBER and pos.symbol == symbol and "classical" in (pos.comment or "").lower()
-            ]
-            pos_type_str_map = {0: "BUY", 1: "SELL"}
-            if any(pos_type_str_map.get(pos.type) == decision for pos in symbol_positions):
-                continue
+                # Duplicate same-direction entry guard
+                symbol_positions = [
+                    pos for pos in get_open_positions()
+                    if pos.magic == MAGIC_NUMBER and pos.symbol == symbol and "classical" in (pos.comment or "").lower()
+                ]
+                pos_type_str_map = {0: "BUY", 1: "SELL"}
+                if any(pos_type_str_map.get(pos.type) == decision for pos in symbol_positions):
+                    continue
 
-            # Stop-loss cooldown reuse (no Gann-specific setup context here)
-            if is_setup_stopped_out(symbol, None, decision):
-                continue
+                # Stop-loss cooldown reuse (no Gann-specific setup context here)
+                if is_setup_stopped_out(symbol, None, decision):
+                    continue
 
-            symbol_info = mt5.symbol_info(symbol)
-            if not symbol_info:
-                continue
+                symbol_info = mt5.symbol_info(symbol)
+                if not symbol_info:
+                    continue
 
-            price_info = get_current_price(symbol)
-            if not price_info:
-                continue
-            entry_price = price_info['ask'] if decision == "BUY" else price_info['bid']
-            atr = context.get("atr") or 0.0
+                price_info = get_current_price(symbol)
+                if not price_info:
+                    continue
+                entry_price = price_info['ask'] if decision == "BUY" else price_info['bid']
+                atr = context.get("atr") or 0.0
 
-            if is_continuation:
-                x_last = consolidation_max_bars - 1
-                if decision == "BUY":
-                    far_level = pattern_info["lower_slope"] * x_last + pattern_info["lower_intercept"]
-                    sl = far_level - atr * atr_sl_multiplier
-                    tp = level + pattern_info["pole_height"] * tp_multiplier
+                if is_continuation:
+                    x_last = consolidation_max_bars - 1
+                    if decision == "BUY":
+                        far_level = pattern_info["lower_slope"] * x_last + pattern_info["lower_intercept"]
+                        sl = far_level - atr * atr_sl_multiplier
+                        tp = level + pattern_info["pole_height"] * tp_multiplier
+                    else:
+                        far_level = pattern_info["upper_slope"] * x_last + pattern_info["upper_intercept"]
+                        sl = far_level + atr * atr_sl_multiplier
+                        tp = level - pattern_info["pole_height"] * tp_multiplier
                 else:
-                    far_level = pattern_info["upper_slope"] * x_last + pattern_info["upper_intercept"]
-                    sl = far_level + atr * atr_sl_multiplier
-                    tp = level - pattern_info["pole_height"] * tp_multiplier
-            else:
-                head = pattern_info["head"]
-                if decision == "BUY":
-                    sl = head - atr * atr_sl_multiplier
-                    tp = level + (level - head) * tp_multiplier
-                else:
-                    sl = head + atr * atr_sl_multiplier
-                    tp = level - (head - level) * tp_multiplier
+                    head = pattern_info["head"]
+                    if decision == "BUY":
+                        sl = head - atr * atr_sl_multiplier
+                        tp = level + (level - head) * tp_multiplier
+                    else:
+                        sl = head + atr * atr_sl_multiplier
+                        tp = level - (head - level) * tp_multiplier
 
-            sl = round(sl, symbol_info.digits)
-            tp = round(tp, symbol_info.digits)
+                sl = round(sl, symbol_info.digits)
+                tp = round(tp, symbol_info.digits)
 
-            # TP must actually sit on the profitable side of entry. Entry can occur
-            # well beyond the breakout level/neckline on a strong move, so a target
-            # computed purely from level +/- a fixed offset can land behind entry —
-            # abs(tp - entry) would still look like a positive R:R, silently letting
-            # a losing trade through as if its target were ahead of it.
-            if decision == "BUY" and tp <= entry_price:
-                print(f"[CLASSICAL] {symbol} rejected: TP ({tp}) is not ahead of entry ({entry_price}) for a BUY.")
-                continue
-            if decision == "SELL" and tp >= entry_price:
-                print(f"[CLASSICAL] {symbol} rejected: TP ({tp}) is not ahead of entry ({entry_price}) for a SELL.")
-                continue
+                # TP must actually sit on the profitable side of entry. Entry can occur
+                # well beyond the breakout level/neckline on a strong move, so a target
+                # computed purely from level +/- a fixed offset can land behind entry —
+                # abs(tp - entry) would still look like a positive R:R, silently letting
+                # a losing trade through as if its target were ahead of it.
+                if decision == "BUY" and tp <= entry_price:
+                    print(f"[CLASSICAL] {symbol} ({timeframe_str}) rejected: TP ({tp}) is not ahead of entry ({entry_price}) for a BUY.")
+                    continue
+                if decision == "SELL" and tp >= entry_price:
+                    print(f"[CLASSICAL] {symbol} ({timeframe_str}) rejected: TP ({tp}) is not ahead of entry ({entry_price}) for a SELL.")
+                    continue
 
-            sl_dist = abs(entry_price - sl)
-            tp_dist = abs(tp - entry_price)
-            if sl_dist <= 0:
-                print(f"[CLASSICAL] {symbol} rejected: Stop Loss at or ahead of entry price.")
-                continue
+                sl_dist = abs(entry_price - sl)
+                tp_dist = abs(tp - entry_price)
+                if sl_dist <= 0:
+                    print(f"[CLASSICAL] {symbol} ({timeframe_str}) rejected: Stop Loss at or ahead of entry price.")
+                    continue
 
-            # Spread guard: same rationale as the other strategies — MT5 closes a
-            # BUY at Bid and a SELL at Ask, not the price the level was computed from.
-            spread = price_info['ask'] - price_info['bid']
-            if tp_dist < spread * min_tp_spread_multiple:
-                print(f"[CLASSICAL] {symbol} rejected: TP distance ({tp_dist:.5f}) too small relative to spread ({spread:.5f}).")
-                continue
+                # Spread guard: same rationale as the other strategies — MT5 closes a
+                # BUY at Bid and a SELL at Ask, not the price the level was computed from.
+                spread = price_info['ask'] - price_info['bid']
+                if tp_dist < spread * min_tp_spread_multiple:
+                    print(f"[CLASSICAL] {symbol} ({timeframe_str}) rejected: TP distance ({tp_dist:.5f}) too small relative to spread ({spread:.5f}).")
+                    continue
 
-            rr_ratio = tp_dist / sl_dist
-            if rr_ratio < min_rr_ratio:
-                print(f"[CLASSICAL] {symbol} rejected: R:R 1:{rr_ratio:.2f} below strategy floor 1:{min_rr_ratio:.2f}.")
-                continue
+                rr_ratio = tp_dist / sl_dist
+                if rr_ratio < min_rr_ratio:
+                    print(f"[CLASSICAL] {symbol} ({timeframe_str}) rejected: R:R 1:{rr_ratio:.2f} below strategy floor 1:{min_rr_ratio:.2f}.")
+                    continue
 
-            volume = calculate_lot_size(symbol, sl, entry_price, risk_percent=risk_percent)
-            reason_msg = f"Classical {pattern_name}: {reason}"
-            classical_context = {"type": decision, "pattern": pattern_name, "level": level}
+                volume = calculate_lot_size(symbol, sl, entry_price, risk_percent=risk_percent)
+                reason_msg = f"Classical {pattern_name} ({timeframe_str}): {reason}"
+                classical_context = {"type": decision, "pattern": pattern_name, "level": level, "timeframe": timeframe_str}
 
-            if not auto_trade_enabled:
-                print(f"[CLASSICAL] Signal-Only Mode: {decision} on {symbol} at {entry_price} (SL: {sl}, TP: {tp}). Not executed.")
-                last_scan_reports[f"{symbol}_classical"] = {
-                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
-                    "status": "Signal Only (Classical)",
-                    "details": reason_msg,
-                    "structure": classical_context
-                }
-                continue
+                if not auto_trade_enabled:
+                    print(f"[CLASSICAL] Signal-Only Mode: {decision} on {symbol} ({timeframe_str}) at {entry_price} (SL: {sl}, TP: {tp}). Not executed.")
+                    last_scan_reports[f"{symbol}_classical_{timeframe_str}"] = {
+                        "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                        "status": "Signal Only (Classical)",
+                        "details": reason_msg,
+                        "structure": classical_context
+                    }
+                    continue
 
-            trade_res = open_trade(
-                action=decision,
-                symbol=symbol,
-                volume=volume,
-                sl=sl,
-                tp=tp,
-                magic=MAGIC_NUMBER,
-                comment=f"Classical {pattern_name} {decision}"[:28]
-            )
-
-            if trade_res and trade_res["success"]:
-                log_trade_open(
-                    ticket=trade_res["ticket"],
-                    symbol=symbol,
+                trade_res = open_trade(
                     action=decision,
+                    symbol=symbol,
                     volume=volume,
-                    entry_price=trade_res["price"],
                     sl=sl,
                     tp=tp,
-                    reason=reason_msg,
-                    gann_data=classical_context
+                    magic=MAGIC_NUMBER,
+                    comment=f"Classical {pattern_name} {decision}"[:28]
                 )
-                print(f"[CLASSICAL] Executed {decision} {volume} lots on {symbol} at {trade_res['price']} (SL: {sl}, TP: {tp}). Ticket: {trade_res['ticket']}.")
-                last_scan_reports[f"{symbol}_classical"] = {
-                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
-                    "status": f"Executed {decision} (Classical {pattern_name})",
-                    "details": reason_msg,
-                    "structure": classical_context
-                }
 
-                entry_time_str = time.strftime('%Y-%m-%d %H:%M:%S')
-                screenshot_url = None
-                try:
-                    from chart_generator import generate_chart_screenshot
-                    from db_manager import update_trade_screenshot
-
-                    screenshot_url = generate_chart_screenshot(
-                        symbol=symbol,
-                        ticket=trade_res["ticket"],
-                        entry_price=trade_res["price"],
-                        sl_price=sl,
-                        tp_price=tp,
-                        timeframe_str=DEFAULT_TIMEFRAME,
-                        entry_time_str=entry_time_str
-                    )
-                    update_trade_screenshot(trade_res["ticket"], screenshot_url)
-                    print(f"[SCREENSHOT] Saved Classical Patterns chart to {screenshot_url}")
-                except Exception as ex:
-                    print(f"[SCREENSHOT] [ERROR] Failed to save Classical Patterns screenshot: {ex}")
-
-                try:
-                    from telegram_notifier import notify_trade_open
-                    from db_manager import update_trade_telegram_msg_id
-                    msg_id = notify_trade_open(
+                if trade_res and trade_res["success"]:
+                    log_trade_open(
                         ticket=trade_res["ticket"],
                         symbol=symbol,
                         action=decision,
@@ -2259,17 +2274,60 @@ def manage_classical_patterns_strategy(settings, active_news_events, risk_percen
                         sl=sl,
                         tp=tp,
                         reason=reason_msg,
-                        screenshot_url=screenshot_url
+                        gann_data=classical_context
                     )
-                    if msg_id:
-                        update_trade_telegram_msg_id(trade_res["ticket"], msg_id)
-                        print(f"[TELEGRAM] Classical Patterns trade open notification sent (Msg ID: {msg_id})")
-                except Exception as tg_ex:
-                    print(f"[TELEGRAM] [ERROR] Failed to send Classical Patterns open alert: {tg_ex}")
-            else:
-                print(f"[CLASSICAL] [ERROR] Failed to execute trade order for {symbol}.")
-        except Exception as classical_ex:
-            print(f"[CLASSICAL] [ERROR] {symbol}: {classical_ex}")
+                    print(f"[CLASSICAL] Executed {decision} {volume} lots on {symbol} ({timeframe_str}) at {trade_res['price']} (SL: {sl}, TP: {tp}). Ticket: {trade_res['ticket']}.")
+                    last_scan_reports[f"{symbol}_classical_{timeframe_str}"] = {
+                        "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                        "status": f"Executed {decision} (Classical {pattern_name})",
+                        "details": reason_msg,
+                        "structure": classical_context
+                    }
+
+                    entry_time_str = time.strftime('%Y-%m-%d %H:%M:%S')
+                    screenshot_url = None
+                    try:
+                        from chart_generator import generate_chart_screenshot
+                        from db_manager import update_trade_screenshot
+
+                        screenshot_url = generate_chart_screenshot(
+                            symbol=symbol,
+                            ticket=trade_res["ticket"],
+                            entry_price=trade_res["price"],
+                            sl_price=sl,
+                            tp_price=tp,
+                            timeframe_str=timeframe_str,
+                            entry_time_str=entry_time_str
+                        )
+                        update_trade_screenshot(trade_res["ticket"], screenshot_url)
+                        print(f"[SCREENSHOT] Saved Classical Patterns chart to {screenshot_url}")
+                    except Exception as ex:
+                        print(f"[SCREENSHOT] [ERROR] Failed to save Classical Patterns screenshot: {ex}")
+
+                    try:
+                        from telegram_notifier import notify_trade_open
+                        from db_manager import update_trade_telegram_msg_id
+                        msg_id = notify_trade_open(
+                            ticket=trade_res["ticket"],
+                            symbol=symbol,
+                            action=decision,
+                            volume=volume,
+                            entry_price=trade_res["price"],
+                            sl=sl,
+                            tp=tp,
+                            reason=reason_msg,
+                            screenshot_url=screenshot_url,
+                            timeframe=timeframe_str
+                        )
+                        if msg_id:
+                            update_trade_telegram_msg_id(trade_res["ticket"], msg_id)
+                            print(f"[TELEGRAM] Classical Patterns trade open notification sent (Msg ID: {msg_id})")
+                    except Exception as tg_ex:
+                        print(f"[TELEGRAM] [ERROR] Failed to send Classical Patterns open alert: {tg_ex}")
+                else:
+                    print(f"[CLASSICAL] [ERROR] Failed to execute trade order for {symbol} ({timeframe_str}).")
+            except Exception as classical_ex:
+                print(f"[CLASSICAL] [ERROR] {symbol} ({timeframe_str}): {classical_ex}")
 
 
 def check_and_execute_trading_cycle():
@@ -2289,6 +2347,7 @@ def check_and_execute_trading_cycle():
     # 1. Load Settings from SQLite Database
     settings = get_settings()
     symbols_to_trade = settings.get("symbols", ["EURUSDm"])
+    scan_timeframes = settings.get("scan_timeframes", [DEFAULT_TIMEFRAME])
     risk_percent = float(settings.get("risk_percent", 1.0))
     max_positions = int(settings.get("max_positions", 2))
     auto_trade_enabled = int(settings.get("auto_trade", 1)) == 1
@@ -2383,10 +2442,13 @@ def check_and_execute_trading_cycle():
             print(f"[ERROR] Failed to initialize AI Engine: {e}")
             return
 
-    # 3. Analyze each symbol
-    for symbol in ([] if max_positions_reached else symbols_to_trade):
+    # 3. Analyze each symbol on each configured timeframe (scan_timeframes) —
+    # iterating (symbol, timeframe) pairs directly here avoids re-indenting the
+    # whole per-symbol block below into a nested loop.
+    scan_pairs = [(s, tf) for s in symbols_to_trade for tf in scan_timeframes]
+    for symbol, timeframe_str in ([] if max_positions_reached else scan_pairs):
         print(f"\n--------------------------------------------------")
-        print(f"🔎 Scanning symbol: {symbol}")
+        print(f"🔎 Scanning symbol: {symbol} ({timeframe_str})")
         print(f"--------------------------------------------------")
 
         # Note: We do not skip here anymore to allow detection of opposite reversal signals
@@ -2434,13 +2496,13 @@ def check_and_execute_trading_cycle():
         gann_geometry = settings.get("gann_geometry", "square")
         grid_enabled = int(settings.get("grid_enabled", 1)) == 1
 
-        tf_constant = get_timeframe(DEFAULT_TIMEFRAME)
+        tf_constant = get_timeframe(timeframe_str)
         if tf_constant is None:
-            print(f"[ERROR] Invalid timeframe configuration: {DEFAULT_TIMEFRAME}")
+            print(f"[ERROR] Invalid timeframe configuration: {timeframe_str}")
             last_scan_reports[symbol] = {
                 "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
                 "status": "Error",
-                "details": f"Invalid timeframe configuration: {DEFAULT_TIMEFRAME}",
+                "details": f"Invalid timeframe configuration: {timeframe_str}",
                 "structure": None
             }
             continue
@@ -2499,7 +2561,8 @@ def check_and_execute_trading_cycle():
                 "entry_angle": dyn["entry_angle"],
                 "target_angle": dyn["target_angle"],
                 "target_price": dyn["target_price"],
-                "sl_price": dyn["sl_price"]
+                "sl_price": dyn["sl_price"],
+                "timeframe": timeframe_str
             }
             print(f"[GANN SETUP] Valid {setup['type']} structure: A={setup['A']}, B={setup['B']}, C={setup['C']} (Retracement: {retr_pct:.1f}%)")
 
@@ -2749,10 +2812,15 @@ def check_and_execute_trading_cycle():
         reasoning = ""
 
         if ai_evaluation_enabled:
-            # Check if we already did an AI scan for this symbol on the current candle to save API usage
+            # Check if we already did an AI scan for this symbol+timeframe on the
+            # current candle to save API usage — keyed by (symbol, timeframe)
+            # since each symbol is now scanned on every configured timeframe, and
+            # a candle-time cache-hit on one timeframe must not suppress a scan
+            # on another.
             current_candle_time = str(candles_df['Time'].iloc[-1])
-            if last_ai_scan_times.get(symbol) == current_candle_time:
-                print(f"[AI CACHE] Already evaluated {symbol} on the current candle ({current_candle_time}). Skipping AI call to save tokens.")
+            ai_scan_cache_key = f"{symbol}_{timeframe_str}"
+            if last_ai_scan_times.get(ai_scan_cache_key) == current_candle_time:
+                print(f"[AI CACHE] Already evaluated {symbol} ({timeframe_str}) on the current candle ({current_candle_time}). Skipping AI call to save tokens.")
                 decision = "HOLD"
                 last_scan_reports[symbol] = {
                     "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
@@ -2765,7 +2833,7 @@ def check_and_execute_trading_cycle():
             try:
                 ai_result = engine.analyze_market(
                     symbol=symbol,
-                    timeframe=DEFAULT_TIMEFRAME,
+                    timeframe=timeframe_str,
                     candles_data=candles_text,
                     account_info=account_info,
                     current_price=price_info,
@@ -2788,9 +2856,9 @@ def check_and_execute_trading_cycle():
                     decision = "HOLD"
                 trade_params = ai_result.get("trade_params")
                 reasoning = ai_result.get("analysis", "HOLD - AI rejected proposed trade")
-                
+
                 # Record scan timestamp in cache
-                last_ai_scan_times[symbol] = current_candle_time
+                last_ai_scan_times[ai_scan_cache_key] = current_candle_time
                 # Reset this symbol's consecutive failure counter on success
                 consecutive_ai_failures[symbol] = 0
             except Exception as e:
@@ -3037,6 +3105,7 @@ def check_and_execute_trading_cycle():
                         sl_price=sl,
                         tp_price=tp,
                         gann_data=gann_context,
+                        timeframe_str=timeframe_str,
                         entry_time_str=entry_time_str
                     )
                     update_trade_screenshot(trade_res["ticket"], screenshot_url)
@@ -3059,7 +3128,8 @@ def check_and_execute_trading_cycle():
                         tp=tp,
                         reason=reason,
                         screenshot_url=screenshot_url,
-                        gann_context=gann_context
+                        gann_context=gann_context,
+                        timeframe=timeframe_str
                     )
                     if msg_id:
                         update_trade_telegram_msg_id(trade_res["ticket"], msg_id)
@@ -3287,12 +3357,13 @@ def check_and_execute_trading_cycle():
                 f"{usage_str}"
                 f"🎯 *أحداث الدورة الحالية (Current Signals):*\n"
                 f"{signals_str}\n{ai_err_str}\n"
-                f"⚙️ تم فحص {len(symbols_to_trade)} زوج (Gann) + "
-                f"{len(settings.get('sma5_reversion_symbols', []))} (SMA5) + "
-                f"{len(settings.get('elliott_wave_symbols', []))} (Elliott) + "
-                f"{len(settings.get('range_trading_symbols', []))} (Range) + "
-                f"{len(settings.get('harmonic_patterns_symbols', []))} (Harmonic) + "
-                f"{len(settings.get('classical_patterns_symbols', []))} (Classical) بنجاح."
+                f"⚙️ تم فحص {len(symbols_to_trade) * len(scan_timeframes)} زوج (Gann) + "
+                f"{len(settings.get('sma5_reversion_symbols', [])) * len(scan_timeframes)} (SMA5) + "
+                f"{len(settings.get('elliott_wave_symbols', [])) * len(scan_timeframes)} (Elliott) + "
+                f"{len(settings.get('range_trading_symbols', [])) * len(scan_timeframes)} (Range) + "
+                f"{len(settings.get('harmonic_patterns_symbols', [])) * len(scan_timeframes)} (Harmonic) + "
+                f"{len(settings.get('classical_patterns_symbols', [])) * len(scan_timeframes)} (Classical) "
+                f"عبر {len(scan_timeframes)} أطر زمنية ({', '.join(scan_timeframes)}) بنجاح."
             )
             send_telegram_message(token, chat_id, report_msg)
             print("[TELEGRAM] Scanning cycle report sent successfully.")

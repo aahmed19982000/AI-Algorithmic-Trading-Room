@@ -113,7 +113,7 @@ def edit_telegram_message_caption(token, chat_id, message_id, caption):
         print(f"[TELEGRAM] Exception in edit_telegram_message_caption: {e}")
         return None
 
-def notify_trade_open(ticket, symbol, action, volume, entry_price, sl, tp, reason, screenshot_url=None, gann_context=None):
+def notify_trade_open(ticket, symbol, action, volume, entry_price, sl, tp, reason, screenshot_url=None, gann_context=None, timeframe=None):
     """Sends an alert to Telegram that a new trade has been opened."""
     enabled, token, chat_id = get_telegram_config()
     if not enabled or not token or not chat_id:
@@ -135,10 +135,12 @@ def notify_trade_open(ticket, symbol, action, volume, entry_price, sl, tp, reaso
     strategy_name = classify_trade_strategy(reason)
     flags = get_symbol_flags(symbol)
     symbol_display = f"{symbol} {flags}" if flags else symbol
+    timeframe_line = f"• *الإطار الزمني (Timeframe):* `{timeframe}`\n" if timeframe else ""
 
     caption = (
         f"🔔 *TRADE OPENED* {emoji}\n\n"
         f"• *Strategy (الاستراتيجية):* `{strategy_name}`\n"
+        f"{timeframe_line}"
         f"• *Ticket:* `#{ticket}`\n"
         f"• *Symbol:* `{symbol_display}`\n"
         f"• *Action:* `{action.upper()}`\n"
