@@ -2743,7 +2743,15 @@ def check_and_execute_trading_cycle():
 
         # --- PRE-AI VALIDATION CHECKS (Token Savers) ---
         # 1. Check active positions for this symbol to prevent double entries in same direction
-        symbol_positions = [pos for pos in active_positions if pos.magic == MAGIC_NUMBER and pos.symbol == symbol]
+        # Excludes the other five strategies' own positions (tagged in their comment)
+        # — otherwise Gann's duplicate-entry guard and reversal-close logic below
+        # would treat any position on this symbol as its own, closing or blocking
+        # around trades that SMA5/Elliott/Range/Harmonic/Classical opened.
+        symbol_positions = [
+            pos for pos in active_positions
+            if pos.magic == MAGIC_NUMBER and pos.symbol == symbol
+            and not any(tag in (pos.comment or "").lower() for tag in ("sma5", "elliott", "range", "harmonic", "classical"))
+        ]
         has_same_direction = False
         if symbol_positions:
             for pos in symbol_positions:
@@ -2950,7 +2958,15 @@ def check_and_execute_trading_cycle():
         }
 
         # Check active positions for this symbol to manage reversals and prevent double entries
-        symbol_positions = [pos for pos in active_positions if pos.magic == MAGIC_NUMBER and pos.symbol == symbol]
+        # Excludes the other five strategies' own positions (tagged in their comment)
+        # — otherwise Gann's duplicate-entry guard and reversal-close logic below
+        # would treat any position on this symbol as its own, closing or blocking
+        # around trades that SMA5/Elliott/Range/Harmonic/Classical opened.
+        symbol_positions = [
+            pos for pos in active_positions
+            if pos.magic == MAGIC_NUMBER and pos.symbol == symbol
+            and not any(tag in (pos.comment or "").lower() for tag in ("sma5", "elliott", "range", "harmonic", "classical"))
+        ]
         has_same_direction = False
         has_opposite_direction = False
         
@@ -2979,7 +2995,14 @@ def check_and_execute_trading_cycle():
             time.sleep(0.5)
             active_positions = get_open_positions()
             open_symbols = [pos.symbol for pos in active_positions]
-            symbol_positions = [pos for pos in active_positions if pos.magic == MAGIC_NUMBER and pos.symbol == symbol]
+            # Excludes the other five strategies' own positions (tagged in their
+            # comment) — same scoping as above, re-applied after the reversal-close
+            # since active_positions was just re-fetched.
+            symbol_positions = [
+                pos for pos in active_positions
+                if pos.magic == MAGIC_NUMBER and pos.symbol == symbol
+                and not any(tag in (pos.comment or "").lower() for tag in ("sma5", "elliott", "range", "harmonic", "classical"))
+            ]
             has_opposite_direction = False
             
         # (Re-entry and duplicate entry checks are now handled pre-AI to conserve tokens)
