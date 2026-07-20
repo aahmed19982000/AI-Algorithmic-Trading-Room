@@ -181,10 +181,16 @@ def init_db():
         "elliott_wave_min_rr_ratio": "1.0",
         "range_trading_enabled": "0",  # OFF by default — new, unvalidated strategy on a live account
         "range_trading_symbols": json.dumps([
-            # Placeholder pool reused from other strategies' symbol lists — NOT a
-            # claim that these pairs range well, just a starting point pending
-            # backtest_range_trading.py review before any of this goes live.
-            "EURUSDm", "USDCHFm", "EURGBPm"
+            # Full available pool (same 39-symbol set used for backtesting this
+            # strategy) — NOT a claim every pair here ranges well, still pending
+            # a live-symbol-list decision from backtest_range_trading.py results
+            # before enabling.
+            "EURUSDm", "GBPUSDm", "USDJPYm", "AUDUSDm", "USDCADm", "USDCHFm", "NZDUSDm",
+            "EURJPYm", "EURGBPm", "GBPJPYm", "EURAUDm", "EURCADm", "GBPAUDm", "EURNZDm",
+            "EURCHFm", "GBPCADm", "AUDJPYm", "GBPCHFm", "GBPNZDm", "NZDCADm", "NZDCHFm",
+            "NZDJPYm", "AUDCADm", "AUDCHFm", "AUDNZDm", "CADCHFm", "CADJPYm", "CHFJPYm",
+            "XAUUSDm", "XAGUSDm", "UKOILm", "USOILm", "BTCUSDm", "ETHUSDm", "LTCUSDm",
+            "XRPUSDm", "SOLUSDm", "DOGEUSDm", "BNBUSDm"
         ]),
         "range_trading_lookback": "100",
         "range_trading_swing_window": "5",
@@ -206,10 +212,16 @@ def init_db():
         "range_trading_min_tp_spread_multiple": "2.0",
         "harmonic_patterns_enabled": "0",  # OFF by default — new, unvalidated strategy on a live account
         "harmonic_patterns_symbols": json.dumps([
-            # Placeholder pool reused from other strategies' symbol lists — NOT a
-            # claim that these pairs form harmonic patterns well, just a starting
-            # point pending backtest_harmonic_patterns.py review before going live.
-            "EURUSDm", "USDCHFm", "EURGBPm"
+            # Full available pool (same 39-symbol set used for backtesting this
+            # strategy) — NOT a claim every pair here forms harmonic patterns
+            # well, still pending a live-symbol-list decision from
+            # backtest_harmonic_patterns.py results before enabling.
+            "EURUSDm", "GBPUSDm", "USDJPYm", "AUDUSDm", "USDCADm", "USDCHFm", "NZDUSDm",
+            "EURJPYm", "EURGBPm", "GBPJPYm", "EURAUDm", "EURCADm", "GBPAUDm", "EURNZDm",
+            "EURCHFm", "GBPCADm", "AUDJPYm", "GBPCHFm", "GBPNZDm", "NZDCADm", "NZDCHFm",
+            "NZDJPYm", "AUDCADm", "AUDCHFm", "AUDNZDm", "CADCHFm", "CADJPYm", "CHFJPYm",
+            "XAUUSDm", "XAGUSDm", "UKOILm", "USOILm", "BTCUSDm", "ETHUSDm", "LTCUSDm",
+            "XRPUSDm", "SOLUSDm", "DOGEUSDm", "BNBUSDm"
         ]),
         "harmonic_patterns_lookback": "100",
         "harmonic_patterns_swing_window": "5",
@@ -226,10 +238,16 @@ def init_db():
         "harmonic_patterns_min_tp_spread_multiple": "2.0",
         "classical_patterns_enabled": "0",  # OFF by default — new, unvalidated strategy on a live account
         "classical_patterns_symbols": json.dumps([
-            # Placeholder pool reused from other strategies' symbol lists — NOT a
-            # claim these pairs form classical chart patterns well, just a starting
-            # point pending backtest_classical_patterns.py review before going live.
-            "EURUSDm", "USDCHFm", "EURGBPm"
+            # Full available pool (same 39-symbol set used for backtesting this
+            # strategy) — NOT a claim every pair here is profitable, still
+            # pending a live-symbol-list decision from backtest_classical_patterns.py
+            # results before enabling.
+            "EURUSDm", "GBPUSDm", "USDJPYm", "AUDUSDm", "USDCADm", "USDCHFm", "NZDUSDm",
+            "EURJPYm", "EURGBPm", "GBPJPYm", "EURAUDm", "EURCADm", "GBPAUDm", "EURNZDm",
+            "EURCHFm", "GBPCADm", "AUDJPYm", "GBPCHFm", "GBPNZDm", "NZDCADm", "NZDCHFm",
+            "NZDJPYm", "AUDCADm", "AUDCHFm", "AUDNZDm", "CADCHFm", "CADJPYm", "CHFJPYm",
+            "XAUUSDm", "XAGUSDm", "UKOILm", "USOILm", "BTCUSDm", "ETHUSDm", "LTCUSDm",
+            "XRPUSDm", "SOLUSDm", "DOGEUSDm", "BNBUSDm"
         ]),
         "classical_patterns_types": json.dumps([
             "Rectangle", "Ascending Triangle", "Descending Triangle", "Rising Wedge",
