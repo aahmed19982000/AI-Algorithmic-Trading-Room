@@ -417,29 +417,57 @@ def save_settings(settings_dict):
 #  Trades Accessors
 # ============================================================
 
-def log_trade_open(ticket, symbol, action, volume, entry_price, sl, tp, reason, gann_data=None):
+def log_trade_open(ticket, symbol, action, volume, entry_price, sl, tp, reason, gann_data=None, open_time=None):
     """Record a newly opened trade in the database."""
     conn = get_db_connection()
     cursor = conn.cursor()
-    open_time = time.strftime('%Y-%m-%d %H:%M:%S')
     
+    if not open_time:
+        try:
+            import MetaTrader5 as mt5
+            from datetime import datetime
+            positions = mt5.positions_get(ticket=ticket) if ticket else None
+            if positions and len(positions) > 0 and positions[0].time > 0:
+                open_time = datetime.utcfromtimestamp(positions[0].time).strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                tick = mt5.symbol_info_tick(symbol) if symbol else None
+                if tick and tick.time > 0:
+                    open_time = datetime.utcfromtimestamp(tick.time).strftime('%Y-%m-%d %H:%M:%S')
+                else:
+                    open_time = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        except Exception:
+            open_time = time.strftime('%Y-%m-%d %H:%M:%S')
+
     gann_str = json.dumps(gann_data) if gann_data else None
-    
+
     cursor.execute("""
     INSERT OR REPLACE INTO trades 
     (ticket, symbol, action, volume, entry_price, sl, tp, reason, open_time, status, profit, close_price, close_time, gann_data) 
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.0, 0.0, '', ?)
     """, (ticket, symbol, action.upper(), volume, entry_price, sl, tp, reason, open_time, 'OPEN', gann_str))
-    
+
     conn.commit()
     conn.close()
 
 
-def log_trade_close(ticket, close_price, profit, exit_reason=None):
+def log_trade_close(ticket, close_price, profit, exit_reason=None, close_time=None):
     """Update a trade to closed status and record results."""
     conn = get_db_connection()
     cursor = conn.cursor()
-    close_time = time.strftime('%Y-%m-%d %H:%M:%S')
+
+    if not close_time:
+        try:
+            import MetaTrader5 as mt5
+            from datetime import datetime
+            trade_info = get_trade_by_ticket(ticket)
+            symbol = trade_info.get("symbol") if trade_info else None
+            tick = mt5.symbol_info_tick(symbol) if symbol else None
+            if tick and tick.time > 0:
+                close_time = datetime.utcfromtimestamp(tick.time).strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                close_time = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        except Exception:
+            close_time = time.strftime('%Y-%m-%d %H:%M:%S')
 
     cursor.execute("""
     UPDATE trades

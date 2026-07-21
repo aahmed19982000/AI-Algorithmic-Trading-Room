@@ -249,7 +249,7 @@ def check_m5_exit_signal(symbol, pos_type, timeframe=None):
     return False
 
 
-def check_elliott_wave4_overlap(ticket, pos_type, current_price):
+def check_elliott_wave4_overlap(ticket, pos_type, current_price, pos=None):
     """
     Elliott Wave invalidation check for an open position: Wave 4 must never
     overlap Wave 1's price territory (a core, non-negotiable Elliott rule).
@@ -261,6 +261,7 @@ def check_elliott_wave4_overlap(ticket, pos_type, current_price):
     """
     from db_manager import get_trade_by_ticket
     import json
+    import datetime as _dt
 
     trade = get_trade_by_ticket(ticket)
     if not trade or not trade.get("gann_data"):
@@ -276,8 +277,7 @@ def check_elliott_wave4_overlap(ticket, pos_type, current_price):
         return False
 
     symbol = trade.get("symbol")
-    open_time_str = trade.get("open_time")
-    if not symbol or not open_time_str:
+    if not symbol:
         return False
 
     # Re-check on the same timeframe the setup was actually detected on (each
@@ -292,8 +292,24 @@ def check_elliott_wave4_overlap(ticket, pos_type, current_price):
     # flag almost every fresh trade as "invalidated" on its very first tick;
     # that's Wave 3 not having started yet, not a genuine overlap.
     try:
-        import datetime as _dt
-        open_dt = _dt.datetime.strptime(open_time_str, "%Y-%m-%d %H:%M:%S")
+        open_dt = None
+        if pos is not None and hasattr(pos, 'time') and pos.time > 0:
+            open_dt = _dt.datetime.utcfromtimestamp(pos.time)
+        else:
+            try:
+                positions = mt5.positions_get(ticket=ticket)
+                if positions and len(positions) > 0 and positions[0].time > 0:
+                    open_dt = _dt.datetime.utcfromtimestamp(positions[0].time)
+            except Exception:
+                pass
+
+        if open_dt is None:
+            open_time_str = trade.get("open_time")
+            if open_time_str:
+                open_dt = _dt.datetime.strptime(open_time_str, "%Y-%m-%d %H:%M:%S")
+            else:
+                return False
+
         candles = get_candles(symbol=symbol, timeframe=get_timeframe(position_timeframe), count=200)
         if candles is None or len(candles) == 0:
             return False
@@ -1092,7 +1108,7 @@ def manage_active_positions_grid():
                 for pos in pos_list:
                     if "elliott" not in (pos.comment or "").lower():
                         continue
-                    if check_elliott_wave4_overlap(pos.ticket, 0 if basket_type == 'BUY' else 1, current_price):
+                    if check_elliott_wave4_overlap(pos.ticket, 0 if basket_type == 'BUY' else 1, current_price, pos=pos):
                         print(f"[ELLIOTT INVALIDATION] Wave 4 overlap detected on {symbol} (ticket #{pos.ticket}). Closing — wave count invalidated.")
                         close_res = close_position(ticket=pos.ticket, comment="Elliott Wave 4 Overlap")
                         if close_res:
