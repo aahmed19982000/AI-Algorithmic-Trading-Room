@@ -1190,6 +1190,74 @@ def manage_active_positions_grid():
                 if any_closed:
                     continue
 
+            # 2.8 SMA5 Reversion: Dynamic Trailing TP to SMA5 (with spread adjustment) & Entry Point Exit
+            if is_sma5_trade:
+                import json
+                from db_manager import get_trade_by_ticket
+                from mt5_orders import modify_position_sl_tp
+
+                any_closed = False
+                for pos in pos_list:
+                    if "sma5" not in (pos.comment or "").lower():
+                        continue
+
+                    trade_row = get_trade_by_ticket(pos.ticket)
+                    pos_tf = DEFAULT_TIMEFRAME
+                    if trade_row and trade_row.get("gann_data"):
+                        try:
+                            gdata = json.loads(trade_row["gann_data"])
+                            pos_tf = gdata.get("timeframe", DEFAULT_TIMEFRAME)
+                        except Exception:
+                            pass
+
+                    candles_df = get_candles(symbol=symbol, timeframe=get_timeframe(pos_tf), count=30)
+                    if candles_df is None or len(candles_df) < 5:
+                        continue
+
+                    price_info = get_current_price(symbol)
+                    if not price_info:
+                        continue
+
+                    # Current SMA5 of last 5 completed candles
+                    current_sma5 = candles_df['Close'].iloc[-6:-1].mean()
+                    spread = price_info['ask'] - price_info['bid']
+                    symbol_info = mt5.symbol_info(symbol)
+                    digits = symbol_info.digits if symbol_info else 5
+                    point = symbol_info.point if symbol_info else (10 ** -digits)
+
+                    # Dynamic TP adjustment considering spread:
+                    # BUY: closes at Bid -> target is current_sma5
+                    # SELL: closes at Ask -> target is current_sma5 + spread
+                    if pos.type == 0:  # BUY
+                        target_tp = round(current_sma5, digits)
+                    else:  # SELL
+                        target_tp = round(current_sma5 + spread, digits)
+
+                    # Update MT5 order TP if SMA5 shifted by more than 1 point
+                    if abs(pos.tp - target_tp) >= point:
+                        print(f"[SMA5 TRAILING TP] Symbol {symbol} (ticket #{pos.ticket}) SMA5 moved. Updating TP from {pos.tp} to {target_tp}")
+                        modify_position_sl_tp(pos.ticket, pos.sl, target_tp)
+
+                    # Entry Point Exit (Break-even / Return to Entry):
+                    entry_price = pos.price_open
+                    is_buy = (pos.type == 0)
+
+                    # 1. Target SMA5 reached or crossed entry price (reversion potential gone)
+                    # 2. Price moved towards SMA5 target and returned to entry price
+                    sma5_crossed_entry = (current_sma5 <= entry_price) if is_buy else (current_sma5 >= entry_price)
+                    returned_to_entry = (current_price <= entry_price and pos.profit >= 0) if is_buy else (current_price >= entry_price and pos.profit >= 0)
+
+                    if sma5_crossed_entry or returned_to_entry:
+                        reason_msg = "SMA5 target reached entry price" if sma5_crossed_entry else "Price returned to entry point (Break-even)"
+                        print(f"[SMA5 EXIT] {reason_msg} on {symbol} (ticket #{pos.ticket}). Closing position.")
+                        close_res = close_position(ticket=pos.ticket, comment="SMA5 Break-even Exit")
+                        if close_res:
+                            log_trade_close(pos.ticket, current_price, pos.profit, exit_reason=f"SMA5 Reversion exit: {reason_msg}")
+                            any_closed = True
+
+                if any_closed:
+                    continue
+
             # 3. Check Swing Exit — on a timeframe proportional to the position's
             # own entry timeframe (stored in gann_data by every strategy), not a
             # fixed M5 regardless of whether this basket is an M30 scalp or a D1
@@ -1325,10 +1393,12 @@ def manage_sma5_reversion_strategy(settings, active_news_events, risk_percent, a
                     continue
 
                 entry_price = price_info['ask'] if decision == "BUY" else price_info['bid']
+                spread = price_info['ask'] - price_info['bid']
                 deviation_distance = abs(entry_price - sma5)
                 sl_distance = sl_multiplier * deviation_distance
                 sl = entry_price - sl_distance if decision == "BUY" else entry_price + sl_distance
-                tp = sma5
+                # Account for spread: BUY closes at Bid (TP=sma5), SELL closes at Ask (TP=sma5+spread)
+                tp = sma5 if decision == "BUY" else (sma5 + spread)
 
                 sl = round(sl, symbol_info.digits)
                 tp = round(tp, symbol_info.digits)
