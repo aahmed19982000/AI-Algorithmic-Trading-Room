@@ -1238,19 +1238,37 @@ def manage_active_positions_grid():
                         print(f"[SMA5 TRAILING TP] Symbol {symbol} (ticket #{pos.ticket}) SMA5 moved. Updating TP from {pos.tp} to {target_tp}")
                         modify_position_sl_tp(pos.ticket, pos.sl, target_tp)
 
+                    # 3. Manual target reach check (fallback if MT5 TP hasn't executed yet)
+                    target_reached = (current_price >= current_sma5) if is_buy else (current_price <= current_sma5)
+
                     # Entry Point Exit (Break-even / Return to Entry):
                     entry_price = pos.price_open
-                    is_buy = (pos.type == 0)
+                    import datetime as _dt
+                    open_dt = _dt.datetime.utcfromtimestamp(pos.time)
+                    since_entry = candles_df[candles_df['Time'] >= open_dt]
+
+                    went_into_profit = False
+                    if len(since_entry) > 0:
+                        if is_buy:
+                            went_into_profit = since_entry['High'].max() > (entry_price + 2 * point)
+                        else:
+                            went_into_profit = since_entry['Low'].min() < (entry_price - 2 * point)
 
                     # 1. Target SMA5 reached or crossed entry price (reversion potential gone)
                     # 2. Price moved towards SMA5 target and returned to entry price
                     sma5_crossed_entry = (current_sma5 <= entry_price) if is_buy else (current_sma5 >= entry_price)
-                    returned_to_entry = (current_price <= entry_price and pos.profit >= 0) if is_buy else (current_price >= entry_price and pos.profit >= 0)
+                    returned_to_entry = went_into_profit and ((current_price <= entry_price) if is_buy else (current_price >= entry_price))
 
-                    if sma5_crossed_entry or returned_to_entry:
-                        reason_msg = "SMA5 target reached entry price" if sma5_crossed_entry else "Price returned to entry point (Break-even)"
+                    if target_reached or sma5_crossed_entry or returned_to_entry:
+                        if target_reached:
+                            reason_msg = f"Price reached SMA5 target ({current_sma5:.5f})"
+                        elif sma5_crossed_entry:
+                            reason_msg = "SMA5 target reached entry price"
+                        else:
+                            reason_msg = "Price returned to entry point (Break-even)"
+
                         print(f"[SMA5 EXIT] {reason_msg} on {symbol} (ticket #{pos.ticket}). Closing position.")
-                        close_res = close_position(ticket=pos.ticket, comment="SMA5 Break-even Exit")
+                        close_res = close_position(ticket=pos.ticket, comment="SMA5 Reversion Exit")
                         if close_res:
                             log_trade_close(pos.ticket, current_price, pos.profit, exit_reason=f"SMA5 Reversion exit: {reason_msg}")
                             any_closed = True
