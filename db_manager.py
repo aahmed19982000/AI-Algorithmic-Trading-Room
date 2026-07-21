@@ -126,6 +126,13 @@ def init_db():
         cursor.execute("ALTER TABLE trades ADD COLUMN telegram_msg_id TEXT")
         conn.commit()
 
+    # Upgrade: Add exit_reason column if it doesn't exist
+    try:
+        cursor.execute("SELECT exit_reason FROM trades LIMIT 1")
+    except sqlite3.OperationalError:
+        cursor.execute("ALTER TABLE trades ADD COLUMN exit_reason TEXT")
+        conn.commit()
+
     # 3. Balance Log Table
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS balance_log (
@@ -428,18 +435,18 @@ def log_trade_open(ticket, symbol, action, volume, entry_price, sl, tp, reason, 
     conn.close()
 
 
-def log_trade_close(ticket, close_price, profit):
+def log_trade_close(ticket, close_price, profit, exit_reason=None):
     """Update a trade to closed status and record results."""
     conn = get_db_connection()
     cursor = conn.cursor()
     close_time = time.strftime('%Y-%m-%d %H:%M:%S')
-    
+
     cursor.execute("""
-    UPDATE trades 
-    SET close_price = ?, profit = ?, close_time = ?, status = 'CLOSED' 
+    UPDATE trades
+    SET close_price = ?, profit = ?, close_time = ?, status = 'CLOSED', exit_reason = ?
     WHERE ticket = ?
-    """, (close_price, profit, close_time, ticket))
-    
+    """, (close_price, profit, close_time, exit_reason, ticket))
+
     conn.commit()
     conn.close()
 

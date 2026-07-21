@@ -38,6 +38,19 @@ load_dotenv()
 MAGIC_NUMBER = int(os.getenv("BOT_MAGIC", "20260604"))
 DEFAULT_TIMEFRAME = os.getenv("TRADING_TIMEFRAME", "H4")
 
+# The swing-reversal exit check (check_m5_exit_signal) needs a timeframe
+# proportionally faster than whatever timeframe a position was actually
+# entered on — a fixed M5 check made sense back when every strategy entered
+# on one shared default timeframe, but is pure noise for a position entered
+# on an H4 or D1 setup now that every strategy can enter on any of
+# scan_timeframes. Falls back to M5 (the original behavior) for anything unmapped.
+EXIT_CHECK_TIMEFRAME_MAP = {
+    "D1": "H4",
+    "H4": "H1",
+    "H1": "M15",
+    "M30": "M5",
+}
+
 # Global dict to store the results of the last scanning cycle per symbol
 last_scan_reports = {}
 last_ai_scan_times = {}
@@ -140,15 +153,26 @@ def is_setup_stopped_out(symbol, gann_context, decision):
     return False
 
 
-def check_m5_exit_signal(symbol, pos_type):
+def check_m5_exit_signal(symbol, pos_type, timeframe=None):
     """
-    Checks if there is an exit signal on M5 timeframe:
-    - For BUY (0): returns True if a Lower Low (LL) is formed on M5,
+    Checks if there is a swing-reversal exit signal on `timeframe` (defaults
+    to M5, its original single-timeframe design):
+    - For BUY (0): returns True if a Lower Low (LL) is formed,
       with a correction separating them, and a candle Close below the previous low.
-    - For SELL (1): returns True if a Higher High (HH) is formed on M5,
+    - For SELL (1): returns True if a Higher High (HH) is formed,
       with a correction separating them, and a candle Close above the previous high.
+
+    Despite the name (kept for compatibility — every call site still refers
+    to "M5 exit"), this now runs on whatever timeframe is passed in. The
+    caller resolves a check timeframe proportional to the position's own
+    entry timeframe (see EXIT_CHECK_TIMEFRAME_MAP in manage_active_positions_grid)
+    — a fixed M5 check made sense when every strategy entered on one shared
+    default timeframe, but is far too fast/noisy for a position entered on
+    an H4 or D1 setup now that every strategy can enter on any of
+    scan_timeframes.
     """
-    df = get_candles(symbol=symbol, timeframe=mt5.TIMEFRAME_M5, count=60)
+    tf = timeframe if timeframe is not None else mt5.TIMEFRAME_M5
+    df = get_candles(symbol=symbol, timeframe=tf, count=60)
     if df is None or len(df) < 15:
         return False
 
@@ -1150,14 +1174,30 @@ def manage_active_positions_grid():
                 if any_closed:
                     continue
 
-            # 3. Check M5 Swing Exit
-            if check_m5_exit_signal(symbol, 0 if basket_type == 'BUY' else 1):
-                # Call AI to verify the exit signal, but only once per M5 candle to avoid
+            # 3. Check Swing Exit — on a timeframe proportional to the position's
+            # own entry timeframe (stored in gann_data by every strategy), not a
+            # fixed M5 regardless of whether this basket is an M30 scalp or a D1
+            # swing trade. Falls back to M5 if no stored timeframe is found
+            # (e.g. a Gann grid-recovery leg, which doesn't store gann_data).
+            entry_timeframe_str = None
+            try:
+                import json
+                from db_manager import get_trade_by_ticket
+                first_trade_row = get_trade_by_ticket(pos_list[0].ticket)
+                if first_trade_row and first_trade_row.get("gann_data"):
+                    entry_timeframe_str = json.loads(first_trade_row["gann_data"]).get("timeframe")
+            except Exception:
+                entry_timeframe_str = None
+            exit_check_timeframe_str = EXIT_CHECK_TIMEFRAME_MAP.get(entry_timeframe_str, "M5")
+            exit_check_tf = get_timeframe(exit_check_timeframe_str) or mt5.TIMEFRAME_M5
+
+            if check_m5_exit_signal(symbol, 0 if basket_type == 'BUY' else 1, timeframe=exit_check_tf):
+                # Call AI to verify the exit signal, but only once per candle to avoid
                 # re-querying the AI on every 30s position-management tick for the same signal.
                 exit_cache_key = f"{symbol}_{basket_type}"
                 ai_exit_confirmed = False
                 try:
-                    m5_df = get_candles(symbol=symbol, timeframe=mt5.TIMEFRAME_M5, count=15)
+                    m5_df = get_candles(symbol=symbol, timeframe=exit_check_tf, count=15)
                     if m5_df is not None and len(m5_df) >= 5:
                         current_m5_candle_time = str(m5_df['Time'].iloc[-1])
                         if last_exit_check_candle.get(exit_cache_key) == current_m5_candle_time:
@@ -1171,21 +1211,21 @@ def manage_active_positions_grid():
                             last_exit_check_candle[exit_cache_key] = current_m5_candle_time
                             last_exit_check_result[exit_cache_key] = ai_exit_confirmed
                     else:
-                        print(f"[AI EXIT CHECK] Not enough M5 candles to verify. Skipping AI check.")
+                        print(f"[AI EXIT CHECK] Not enough {exit_check_timeframe_str} candles to verify. Skipping AI check.")
                 except Exception as ai_ex:
                     print(f"[AI EXIT CHECK] [ERROR] Failed to run AI exit verification: {ai_ex}")
-                
+
                 if ai_exit_confirmed:
-                    exit_reason_ar = "تأكيد انعكاس الاتجاه على M5 بواسطة الذكاء الاصطناعي"
-                    exit_reason_en = f"AI Verified M5 Exit"
-                    print(f"[M5 EXIT] AI CONFIRMED exit for {symbol}. Closing basket.")
+                    exit_reason_ar = f"تأكيد انعكاس الاتجاه على {exit_check_timeframe_str} بواسطة الذكاء الاصطناعي"
+                    exit_reason_en = f"AI Verified {exit_check_timeframe_str} Exit"
+                    print(f"[SWING EXIT] AI CONFIRMED exit for {symbol} on {exit_check_timeframe_str}. Closing basket.")
                     for pos in pos_list:
                         close_res = close_position(ticket=pos.ticket, comment=exit_reason_en[:28])
                         if close_res:
                             log_trade_close(pos.ticket, current_price, pos.profit, exit_reason=f"{exit_reason_en} ({exit_reason_ar})")
                     continue
                 else:
-                    print(f"[M5 EXIT BLOCK] M5 exit trigger detected, but AI rejected it as noise. Keeping position open.")
+                    print(f"[SWING EXIT BLOCK] {exit_check_timeframe_str} exit trigger detected, but AI rejected it as noise. Keeping position open.")
                 
             # 4. Check 50% Breakeven (Move SL to weighted average entry price)
             if pct_reached >= 0.50:
