@@ -535,9 +535,20 @@ def get_strategy_performance_summary(limit=1000):
     """
     Aggregates closed-trade win/loss counts and net profit per strategy,
     inferred from each trade's `reason` text via classify_trade_strategy().
+    Pre-populates all known strategies so that every strategy is included
+    in cycle reports even if it has no closed trades yet.
     """
     history = get_trade_history(limit=limit)
-    summary = {}
+    known_strategies = [
+        "Gann",
+        "SMA5 Reversion",
+        "Elliott Wave",
+        "Range Trading",
+        "Harmonic Patterns",
+        "Classical Chart Patterns",
+        "Technical Fallback"
+    ]
+    summary = {strat: {"wins": 0, "losses": 0, "profit": 0.0} for strat in known_strategies}
 
     for trade in history:
         if trade.get("status") != "CLOSED":
