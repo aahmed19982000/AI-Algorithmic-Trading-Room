@@ -1352,7 +1352,8 @@ def manage_sma5_reversion_strategy(settings, active_news_events, risk_percent, a
     rsi_overbought = float(settings.get("sma5_reversion_rsi_overbought", 65.0))
     rsi_oversold = float(settings.get("sma5_reversion_rsi_oversold", 35.0))
     min_tp_spread_multiple = float(settings.get("sma5_reversion_min_tp_spread_multiple", 2.0))
-    scan_timeframes = settings.get("scan_timeframes", [DEFAULT_TIMEFRAME])
+    # SMA5 reversion strategy is strictly restricted to H1 (1 Hour) timeframe
+    scan_timeframes = ["H1"]
 
     for symbol in sma5_symbols:
         for timeframe_str in scan_timeframes:
@@ -3536,13 +3537,13 @@ def check_and_execute_trading_cycle():
                 f"{usage_str}"
                 f"🎯 *أحداث الدورة الحالية (Current Signals):*\n"
                 f"{signals_str}\n{ai_err_str}\n"
-                f"⚙️ تم فحص {len(symbols_to_trade) * len(scan_timeframes)} زوج (Gann) + "
-                f"{len(settings.get('sma5_reversion_symbols', [])) * len(scan_timeframes)} (SMA5) + "
-                f"{len(settings.get('elliott_wave_symbols', [])) * len(scan_timeframes)} (Elliott) + "
-                f"{len(settings.get('range_trading_symbols', [])) * len(scan_timeframes)} (Range) + "
-                f"{len(settings.get('harmonic_patterns_symbols', [])) * len(scan_timeframes)} (Harmonic) + "
-                f"{len(settings.get('classical_patterns_symbols', [])) * len(scan_timeframes)} (Classical) "
-                f"عبر {len(scan_timeframes)} أطر زمنية ({', '.join(scan_timeframes)}) بنجاح."
+                 f"⚙️ تم فحص {len(symbols_to_trade) * len(scan_timeframes)} زوج (Gann) + "
+                 f"{len(settings.get('sma5_reversion_symbols', [])) * 1} (SMA5 على H1 فقط) + "
+                 f"{len(settings.get('elliott_wave_symbols', [])) * len(scan_timeframes)} (Elliott) + "
+                 f"{len(settings.get('range_trading_symbols', [])) * len(scan_timeframes)} (Range) + "
+                 f"{len(settings.get('harmonic_patterns_symbols', [])) * len(scan_timeframes)} (Harmonic) + "
+                 f"{len(settings.get('classical_patterns_symbols', [])) * len(scan_timeframes)} (Classical) "
+                 f"عبر أطر زمنية ({', '.join(scan_timeframes)}) بنجاح."
             )
             send_telegram_message(token, chat_id, report_msg)
             print("[TELEGRAM] Scanning cycle report sent successfully.")
