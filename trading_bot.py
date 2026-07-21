@@ -3367,6 +3367,37 @@ def check_and_execute_trading_cycle():
             active_count = len(latest_active)
             total_lots = sum(pos.volume for pos in latest_active)
             total_profit = sum(pos.profit for pos in latest_active)
+
+            # Classify active positions by strategy
+            open_by_strat_str = ""
+            if latest_active:
+                try:
+                    from db_manager import get_trade_by_ticket, classify_trade_strategy
+                    strat_groups = {}
+                    for pos in latest_active:
+                        db_t = get_trade_by_ticket(pos.ticket)
+                        reason_str = db_t.get("reason") if db_t else (pos.comment or "")
+                        st_name = classify_trade_strategy(reason_str)
+                        if st_name not in strat_groups:
+                            strat_groups[st_name] = {"count": 0, "volume": 0.0, "profit": 0.0, "symbols": []}
+                        strat_groups[st_name]["count"] += 1
+                        strat_groups[st_name]["volume"] += pos.volume
+                        strat_groups[st_name]["profit"] += pos.profit
+                        strat_groups[st_name]["symbols"].append(pos.symbol)
+
+                    lines_active = []
+                    for st_name, gdata in strat_groups.items():
+                        unique_syms = list(dict.fromkeys(gdata["symbols"]))
+                        syms_text = ", ".join(unique_syms[:3])
+                        if len(unique_syms) > 3:
+                            syms_text += f" +{len(unique_syms)-3}"
+                        lines_active.append(
+                            f"  • *{st_name}:* `{gdata['count']}` صفقات (`{gdata['volume']:.2f}l`) — `{gdata['profit']:+.2f} USD` [{syms_text}]"
+                        )
+                    if lines_active:
+                        open_by_strat_str = "• *تفصيل الصفقات المفتوحة حسب الاستراتيجية:*\n" + "\n".join(lines_active) + "\n"
+                except Exception as open_strat_ex:
+                    print(f"[ERROR] Failed to breakdown active positions by strategy: {open_strat_ex}")
             
             # Find signals triggered in this cycle
             triggered_signals = []
@@ -3429,9 +3460,8 @@ def check_and_execute_trading_cycle():
                 f"• السيولة (Equity): `{equity_val:.2f} {currency}`\n"
                 f"• الهامش الحر (Free Margin): `{free_margin:.2f} {currency}`\n\n"
                 f"📈 *الصفقات المفتوحة (Portfolio Status):*\n"
-                f"• إجمالي الصفقات: `{active_count}` صفقات\n"
-                f"• إجمالي العقود: `{total_lots:.2f} lots`\n"
-                f"• الأرباح العائمة: `{total_profit:+.2f} {currency}`\n\n"
+                f"• إجمالي الصفقات: `{active_count}` صفقات (`{total_lots:.2f} lots`) — الأرباح: `{total_profit:+.2f} {currency}`\n"
+                f"{open_by_strat_str}\n"
                 f"{strategy_perf_str}"
                 f"{usage_str}"
                 f"🎯 *أحداث الدورة الحالية (Current Signals):*\n"
