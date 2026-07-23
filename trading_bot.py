@@ -2197,8 +2197,10 @@ def manage_harmonic_patterns_strategy(settings, active_news_events, risk_percent
                             entry_price=trade_res["price"],
                             sl_price=sl,
                             tp_price=tp,
+                            gann_data=harmonic_context,
                             timeframe_str=timeframe_str,
-                            entry_time_str=entry_time_str
+                            entry_time_str=entry_time_str,
+                            strategy_label="Harmonic Patterns"
                         )
                         update_trade_screenshot(trade_res["ticket"], screenshot_url)
                         print(f"[SCREENSHOT] Saved Harmonic Patterns chart to {screenshot_url}")
@@ -2387,7 +2389,15 @@ def manage_classical_patterns_strategy(settings, active_news_events, risk_percen
 
                 volume = calculate_lot_size(symbol, sl, entry_price, risk_percent=risk_percent)
                 reason_msg = f"Classical {pattern_name} ({timeframe_str}): {reason}"
-                classical_context = {"type": decision, "pattern": pattern_name, "level": level, "timeframe": timeframe_str}
+                classical_context = {
+                    "type": decision,
+                    "pattern": pattern_name,
+                    "level": level,
+                    "timeframe": timeframe_str,
+                    "is_continuation": is_continuation,
+                    "pattern_info": pattern_info,
+                    "consol_start_time": candles_df.iloc[candles_df.shape[0] - consolidation_max_bars]['Time'].strftime('%Y-%m-%d %H:%M:%S') if 'Time' in candles_df.columns else str(candles_df.index[candles_df.shape[0] - consolidation_max_bars])
+                }
 
                 if not auto_trade_enabled:
                     print(f"[CLASSICAL] Signal-Only Mode: {decision} on {symbol} ({timeframe_str}) at {entry_price} (SL: {sl}, TP: {tp}). Not executed.")
@@ -2441,8 +2451,10 @@ def manage_classical_patterns_strategy(settings, active_news_events, risk_percen
                             entry_price=trade_res["price"],
                             sl_price=sl,
                             tp_price=tp,
+                            gann_data=classical_context,
                             timeframe_str=timeframe_str,
-                            entry_time_str=entry_time_str
+                            entry_time_str=entry_time_str,
+                            strategy_label="Classical Patterns"
                         )
                         update_trade_screenshot(trade_res["ticket"], screenshot_url)
                         print(f"[SCREENSHOT] Saved Classical Patterns chart to {screenshot_url}")

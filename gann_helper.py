@@ -768,18 +768,32 @@ def detect_harmonic_pattern(df, lookback=100, window=5, patterns=None,
                 else:
                     d_via_ad = val_A + ad_ratio * xa
                     d_via_cd = val_C + cd_ratio * bc
-
                 d_min = min(d_via_ad, d_via_cd)
                 if d_min == 0:
                     continue
                 if abs(d_via_ad - d_via_cd) / abs(d_min) * 100.0 > prz_confluence_pct:
                     continue
 
+                def _time_str(idx):
+                    for col in ['Time', 'time']:
+                        if col in df.columns:
+                            v = df.iloc[idx][col]
+                            if hasattr(v, 'strftime'):
+                                return v.strftime('%Y-%m-%d %H:%M:%S')
+                            return str(v)
+                    if idx < len(df.index):
+                        v = df.index[idx]
+                        if hasattr(v, 'strftime'):
+                            return v.strftime('%Y-%m-%d %H:%M:%S')
+                        return str(v)
+                    return ""
+
                 return {
                     "pattern": name,
                     "type": "BUY" if is_bullish else "SELL",
                     "X": float(val_X), "A": float(val_A), "B": float(val_B), "C": float(val_C),
-                    "idx_C": int(idx_C),
+                    "idx_X": int(idx_X), "idx_A": int(idx_A), "idx_B": int(idx_B), "idx_C": int(idx_C),
+                    "time_X": _time_str(idx_X), "time_A": _time_str(idx_A), "time_B": _time_str(idx_B), "time_C": _time_str(idx_C),
                     "d_zone_low": float(min(d_via_ad, d_via_cd)),
                     "d_zone_high": float(max(d_via_ad, d_via_cd)),
                     "prz_price": float((d_via_ad + d_via_cd) / 2.0),
@@ -991,6 +1005,20 @@ def detect_reversal_pattern(df, lookback=100, window=5, shoulder_tolerance_pct=2
     window_highs = [p for p in pivots_high if lookback_start <= p[0] <= last_idx]
     window_lows = [p for p in pivots_low if lookback_start <= p[0] <= last_idx]
 
+    def _time_str(idx):
+        for col in ['Time', 'time']:
+            if col in df.columns:
+                v = df.iloc[idx][col]
+                if hasattr(v, 'strftime'):
+                    return v.strftime('%Y-%m-%d %H:%M:%S')
+                return str(v)
+        if idx < len(df.index):
+            v = df.index[idx]
+            if hasattr(v, 'strftime'):
+                return v.strftime('%Y-%m-%d %H:%M:%S')
+            return str(v)
+        return ""
+
     if "Head and Shoulders" in patterns and len(window_highs) >= 3 and len(window_lows) >= 2:
         for idx_sb, val_sb in reversed(window_highs):
             head_candidates = [p for p in window_highs if p[0] < idx_sb]
@@ -1016,7 +1044,11 @@ def detect_reversal_pattern(df, lookback=100, window=5, shoulder_tolerance_pct=2
                 return {
                     "pattern": "Head and Shoulders", "type": "SELL",
                     "head": float(val_head), "shoulder_a": float(val_sa), "shoulder_b": float(val_sb),
-                    "neckline_level": float((val_t1 + val_t2) / 2.0), "idx_head": int(idx_head)
+                    "neckline_level": float((val_t1 + val_t2) / 2.0), 
+                    "idx_head": int(idx_head), "idx_sa": int(idx_sa), "idx_sb": int(idx_sb),
+                    "time_head": _time_str(idx_head), "time_sa": _time_str(idx_sa), "time_sb": _time_str(idx_sb),
+                    "time_t1": _time_str(idx_t1), "time_t2": _time_str(idx_t2),
+                    "val_t1": float(val_t1), "val_t2": float(val_t2)
                 }
 
     if "Inverse Head and Shoulders" in patterns and len(window_lows) >= 3 and len(window_highs) >= 2:
@@ -1044,7 +1076,11 @@ def detect_reversal_pattern(df, lookback=100, window=5, shoulder_tolerance_pct=2
                 return {
                     "pattern": "Inverse Head and Shoulders", "type": "BUY",
                     "head": float(val_head), "shoulder_a": float(val_sa), "shoulder_b": float(val_sb),
-                    "neckline_level": float((val_p1 + val_p2) / 2.0), "idx_head": int(idx_head)
+                    "neckline_level": float((val_p1 + val_p2) / 2.0), 
+                    "idx_head": int(idx_head), "idx_sa": int(idx_sa), "idx_sb": int(idx_sb),
+                    "time_head": _time_str(idx_head), "time_sa": _time_str(idx_sa), "time_sb": _time_str(idx_sb),
+                    "time_p1": _time_str(idx_p1), "time_p2": _time_str(idx_p2),
+                    "val_p1": float(val_p1), "val_p2": float(val_p2)
                 }
 
     if "Double Top" in patterns and len(window_highs) >= 2 and len(window_lows) >= 1:
@@ -1061,7 +1097,9 @@ def detect_reversal_pattern(df, lookback=100, window=5, shoulder_tolerance_pct=2
                 return {
                     "pattern": "Double Top", "type": "SELL",
                     "head": float(val_p1), "shoulder_a": float(val_p1), "shoulder_b": float(val_p2),
-                    "neckline_level": float(val_neck), "idx_head": int(idx_p2)
+                    "neckline_level": float(val_neck), 
+                    "idx_head": int(idx_p2), "idx_sa": int(idx_p1), "idx_sb": int(idx_p2), "idx_neck": int(idx_neck),
+                    "time_head": _time_str(idx_p2), "time_sa": _time_str(idx_p1), "time_sb": _time_str(idx_p2), "time_neck": _time_str(idx_neck)
                 }
 
     if "Double Bottom" in patterns and len(window_lows) >= 2 and len(window_highs) >= 1:
@@ -1078,7 +1116,9 @@ def detect_reversal_pattern(df, lookback=100, window=5, shoulder_tolerance_pct=2
                 return {
                     "pattern": "Double Bottom", "type": "BUY",
                     "head": float(val_t1), "shoulder_a": float(val_t1), "shoulder_b": float(val_t2),
-                    "neckline_level": float(val_neck), "idx_head": int(idx_t2)
+                    "neckline_level": float(val_neck), 
+                    "idx_head": int(idx_t2), "idx_sa": int(idx_t1), "idx_sb": int(idx_t2), "idx_neck": int(idx_neck),
+                    "time_head": _time_str(idx_t2), "time_sa": _time_str(idx_t1), "time_sb": _time_str(idx_t2), "time_neck": _time_str(idx_neck)
                 }
 
     return None

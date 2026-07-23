@@ -94,16 +94,55 @@ def generate_chart_screenshot(symbol, ticket, entry_price, sl_price, tp_price, g
         
     idx_exit_uncropped = get_idx_of_time(df, exit_time_str) if exit_time_str else None
     
+    idx_X_uncropped = None
     idx_A_uncropped = None
     idx_B_uncropped = None
     idx_C_uncropped = None
     
-    if gann_data:
-        trade_type = gann_data.get("type", "BUY")
+    val_X = None
+    val_A = None
+    val_B = None
+    val_C = None
+    
+    # Check if this is a reversal classical pattern
+    is_reversal_classical = False
+    if gann_data and strategy_label == "Classical Patterns" and not gann_data.get("is_continuation", False):
+        pattern_info = gann_data.get("pattern_info")
+        if pattern_info:
+            is_reversal_classical = True
+            val_A = pattern_info.get("shoulder_a")
+            val_B = pattern_info.get("head")
+            val_C = pattern_info.get("shoulder_b")
+            if pattern_info.get("time_sa"):
+                idx_A_uncropped = get_idx_of_time(df, pattern_info["time_sa"])
+            if pattern_info.get("time_head"):
+                idx_B_uncropped = get_idx_of_time(df, pattern_info["time_head"])
+            if pattern_info.get("time_sb"):
+                idx_C_uncropped = get_idx_of_time(df, pattern_info["time_sb"])
+    
+    elif gann_data:
+        val_X = gann_data.get("X")
         val_A = gann_data.get("A")
         val_B = gann_data.get("B")
         val_C = gann_data.get("C")
+        trade_type = gann_data.get("type", "BUY")
         
+        # Resolve Point X
+        if gann_data.get("time_X"):
+            idx_X_uncropped = get_idx_of_time(df, gann_data["time_X"])
+        if (idx_X_uncropped is None or idx_X_uncropped < 0) and val_X is not None:
+            search_limit = idx_entry_uncropped
+            col = 'Low' if trade_type == 'SELL' else 'High'
+            best_idx = None
+            min_diff = float('inf')
+            for i in range(0, search_limit):
+                diff = abs(df.iloc[i][col] - val_X)
+                if diff < min_diff:
+                    min_diff = diff
+                    best_idx = i
+            if min_diff <= val_X * 0.0005:
+                idx_X_uncropped = best_idx
+
         # Resolve Point A index
         if gann_data.get("time_A"):
             idx_A_uncropped = get_idx_of_time(df, gann_data["time_A"])
@@ -152,13 +191,22 @@ def generate_chart_screenshot(symbol, ticket, entry_price, sl_price, tp_price, g
             if min_diff <= val_C * 0.0005:
                 idx_C_uncropped = best_idx
                 
-    # Crop df to start 10 candles before Point A if found
+    # Crop df to start 10 candles before the pattern start if found
     crop_offset = 0
-    if idx_A_uncropped is not None and idx_A_uncropped >= 10:
-        crop_offset = idx_A_uncropped - 10
+    start_pivot_idx = idx_A_uncropped
+    if idx_X_uncropped is not None:
+        start_pivot_idx = idx_X_uncropped
+    elif gann_data and strategy_label == "Classical Patterns" and gann_data.get("is_continuation", False):
+        consol_start_time = gann_data.get("consol_start_time")
+        if consol_start_time:
+            start_pivot_idx = get_idx_of_time(df, consol_start_time)
+            
+    if start_pivot_idx is not None and start_pivot_idx >= 10:
+        crop_offset = start_pivot_idx - 10
         df = df.iloc[crop_offset:]
         
     # Calculate final cropped indices
+    idx_X = idx_X_uncropped - crop_offset if idx_X_uncropped is not None else None
     idx_A = idx_A_uncropped - crop_offset if idx_A_uncropped is not None else None
     idx_B = idx_B_uncropped - crop_offset if idx_B_uncropped is not None else None
     idx_C = idx_C_uncropped - crop_offset if idx_C_uncropped is not None else None
@@ -188,13 +236,13 @@ def generate_chart_screenshot(symbol, ticket, entry_price, sl_price, tp_price, g
     )
     
     # Build horizontal lines
-    original_sl = gann_data.get("A") if gann_data else None
+    original_sl = val_A
     hlines = [entry_price, tp_price]
     hl_colors = ['#f1c40f', '#2ecc71']
     
     if original_sl and abs(sl_price - original_sl) > 1e-5:
         hlines.extend([sl_price, original_sl])
-        hl_colors.extend(['#e74c3c', '#d35400']) # red for trailed SL, orange for original SL (Point A)
+        hl_colors.extend(['#e74c3c', '#d35400']) # red for trailed SL, orange for original SL
     else:
         hlines.append(sl_price)
         hl_colors.append('#e74c3c')
@@ -209,11 +257,23 @@ def generate_chart_screenshot(symbol, ticket, entry_price, sl_price, tp_price, g
     # Prepare title text
     setup_title = f"{symbol} ({timeframe_str}) - Trade #{ticket}"
     if gann_data:
-        setup_title += f"\n{strategy_label} Setup: A={gann_data.get('A', 0):.5f}, B={gann_data.get('B', 0):.5f}, C={gann_data.get('C', 0):.5f} ({gann_data.get('type', '')})"
+        p_name = gann_data.get("pattern", strategy_label)
+        if strategy_label == "Classical Patterns" and gann_data.get("is_continuation", False):
+            setup_title += f"\nContinuation Pattern: {p_name} ({gann_data.get('type', '')})"
+        elif strategy_label == "Classical Patterns":
+            setup_title += f"\nReversal Pattern: {p_name} ({gann_data.get('type', '')})"
+        elif strategy_label == "Harmonic Patterns":
+            setup_title += f"\nHarmonic Pattern: {p_name} ({gann_data.get('type', '')})"
+        else:
+            setup_title += f"\n{strategy_label} Setup: A={val_A:.5f}, B={val_B:.5f}, C={val_C:.5f} ({gann_data.get('type', '')})"
 
     point_labels = {
         "Elliott Wave": ("Wave 0 (Start)", "Wave 1 (Peak)", "Wave 2 (Correction)"),
+        "Harmonic Patterns": ("X", "A", "B", "C"),
     }.get(strategy_label, ("Point A (Origin)", "Point B (Breakout)", "Point C (Correction)"))
+    
+    if is_reversal_classical:
+        point_labels = ("Left Shoulder", "Head", "Right Shoulder")
         
     # Plot using mplfinance
     fig, axlist = mpf.plot(
@@ -241,10 +301,8 @@ def generate_chart_screenshot(symbol, ticket, entry_price, sl_price, tp_price, g
     ax.text(x_pos, tp_price, '  TP (Target)', color='#2ecc71', fontsize=8, fontweight='bold', va='center')
     
     if original_sl and abs(sl_price - original_sl) > 1e-5:
-        ax.text(x_pos, original_sl, '  Original SL (Point A)', color='#d35400', fontsize=8, fontweight='bold', va='center')
+        ax.text(x_pos, original_sl, '  Original SL', color='#d35400', fontsize=8, fontweight='bold', va='center')
     
-    # Swing pivot indices are already calculated and shifted above
-
     # Plot Connectors and circles
     pivots_x = []
     pivots_y = []
@@ -252,37 +310,79 @@ def generate_chart_screenshot(symbol, ticket, entry_price, sl_price, tp_price, g
     if gann_data:
         trade_type = gann_data.get("type", "BUY")
         
-        if idx_A is not None and idx_A >= 0:
-            val_A = gann_data.get("A")
-            if val_A:
+        # 1. Harmonic Patterns Drawing
+        if strategy_label == "Harmonic Patterns":
+            if all(v is not None for v in [idx_X, idx_A, idx_B, idx_C, idx_entry]) and all(val is not None for val in [val_X, val_A, val_B, val_C]):
+                # Connect standard X-A-B-C-D leg
+                ax.plot([idx_X, idx_A, idx_B, idx_C, idx_entry], 
+                        [val_X, val_A, val_B, val_C, entry_price], 
+                        color='#9b59b6', linestyle='-', linewidth=2, zorder=4)
+                # Triangle X-A-B
+                ax.plot([idx_X, idx_B], [val_X, val_B], color='#9b59b6', linestyle='--', linewidth=1, zorder=3)
+                # Triangle B-C-D
+                ax.plot([idx_B, idx_entry], [val_B, entry_price], color='#9b59b6', linestyle='--', linewidth=1, zorder=3)
+                # Connect A-C
+                ax.plot([idx_A, idx_C], [val_A, val_C], color='#9b59b6', linestyle='--', linewidth=1, zorder=3)
+                
+                # Markers and text
+                ax.plot(idx_X, val_X, marker='o', color='#e74c3c', markersize=8, zorder=5)
+                ax.text(idx_X, val_X, '  X', color='#e74c3c', fontsize=10, fontweight='bold', va='center')
+                ax.plot(idx_A, val_A, marker='o', color='#2ecc71', markersize=8, zorder=5)
+                ax.text(idx_A, val_A, '  A', color='#2ecc71', fontsize=10, fontweight='bold', va='center')
+                ax.plot(idx_B, val_B, marker='o', color='#f1c40f', markersize=8, zorder=5)
+                ax.text(idx_B, val_B, '  B', color='#f1c40f', fontsize=10, fontweight='bold', va='center')
+                ax.plot(idx_C, val_C, marker='o', color='#3498db', markersize=8, zorder=5)
+                ax.text(idx_C, val_C, '  C', color='#3498db', fontsize=10, fontweight='bold', va='center')
+                ax.plot(idx_entry, entry_price, marker='o', color='#1abc9c', markersize=8, zorder=5)
+                ax.text(idx_entry, entry_price, '  D', color='#1abc9c', fontsize=10, fontweight='bold', va='center')
+                
+        # 2. Classical Continuation Patterns (Trendlines)
+        elif strategy_label == "Classical Patterns" and gann_data.get("is_continuation", False):
+            pattern_info = gann_data.get("pattern_info")
+            consol_start_time = gann_data.get("consol_start_time")
+            if pattern_info and consol_start_time:
+                idx_consol_start = get_idx_of_time(df, consol_start_time)
+                if idx_consol_start is not None and idx_consol_start >= 0:
+                    idxs = []
+                    y_uppers = []
+                    y_lowers = []
+                    for idx_val in range(idx_consol_start, len(df)):
+                        x = idx_val - idx_consol_start
+                        y_up = pattern_info["upper_slope"] * x + pattern_info["upper_intercept"]
+                        y_lo = pattern_info["lower_slope"] * x + pattern_info["lower_intercept"]
+                        idxs.append(idx_val)
+                        y_uppers.append(y_up)
+                        y_lowers.append(y_lo)
+                    ax.plot(idxs, y_uppers, color='#3498db', linestyle='-', linewidth=2, zorder=4)
+                    ax.plot(idxs, y_lowers, color='#e74c3c', linestyle='-', linewidth=2, zorder=4)
+                    
+        # 3. Gann / Elliott Wave / Reversal Classical Patterns (A-B-C pivot structure)
+        else:
+            if idx_A is not None and idx_A >= 0 and val_A is not None:
                 pivots_x.append(idx_A)
                 pivots_y.append(val_A)
                 ax.plot(idx_A, val_A, marker='o', color='#f39c12', markersize=8, zorder=5)
                 va_A = 'top' if trade_type == 'BUY' else 'bottom'
                 ax.text(idx_A, val_A, f'  {point_labels[0]}', color='#f39c12', fontsize=9, fontweight='bold', va=va_A, ha='left')
                 
-        if idx_B is not None and idx_B >= 0:
-            val_B = gann_data.get("B")
-            if val_B:
+            if idx_B is not None and idx_B >= 0 and val_B is not None:
                 pivots_x.append(idx_B)
                 pivots_y.append(val_B)
                 ax.plot(idx_B, val_B, marker='o', color='#e67e22', markersize=8, zorder=5)
                 va_B = 'bottom' if trade_type == 'BUY' else 'top'
                 ax.text(idx_B, val_B, f'  {point_labels[1]}', color='#e67e22', fontsize=9, fontweight='bold', va=va_B)
                 
-        if idx_C is not None and idx_C >= 0:
-            val_C = gann_data.get("C")
-            if val_C:
+            if idx_C is not None and idx_C >= 0 and val_C is not None:
                 pivots_x.append(idx_C)
                 pivots_y.append(val_C)
                 ax.plot(idx_C, val_C, marker='o', color='#3498db', markersize=8, zorder=5)
                 va_C = 'top' if trade_type == 'BUY' else 'bottom'
                 ax.text(idx_C, val_C, f'  {point_labels[2]}', color='#3498db', fontsize=9, fontweight='bold', va=va_C)
                 
-        if len(pivots_x) > 1:
-            pivot_pts = sorted(zip(pivots_x, pivots_y))
-            px, py = zip(*pivot_pts)
-            ax.plot(px, py, color='#9b59b6', linestyle='dotted', linewidth=1.5, zorder=4)
+            if len(pivots_x) > 1:
+                pivot_pts = sorted(zip(pivots_x, pivots_y))
+                px, py = zip(*pivot_pts)
+                ax.plot(px, py, color='#9b59b6', linestyle='dotted', linewidth=1.5, zorder=4)
 
     # 4. Plot Entry and Exit vertical lines and markers
     if idx_entry is not None and idx_entry >= 0:
