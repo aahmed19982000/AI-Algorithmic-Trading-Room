@@ -294,12 +294,12 @@ def check_elliott_wave4_overlap(ticket, pos_type, current_price, pos=None):
     try:
         open_dt = None
         if pos is not None and hasattr(pos, 'time') and pos.time > 0:
-            open_dt = _dt.datetime.utcfromtimestamp(pos.time)
+            open_dt = _dt.datetime.fromtimestamp(pos.time, _dt.timezone.utc).replace(tzinfo=None)
         else:
             try:
                 positions = mt5.positions_get(ticket=ticket)
                 if positions and len(positions) > 0 and positions[0].time > 0:
-                    open_dt = _dt.datetime.utcfromtimestamp(positions[0].time)
+                    open_dt = _dt.datetime.fromtimestamp(positions[0].time, _dt.timezone.utc).replace(tzinfo=None)
             except Exception:
                 pass
 
@@ -1244,7 +1244,7 @@ def manage_active_positions_grid():
                     # Entry Point Exit (Break-even / Return to Entry):
                     entry_price = pos.price_open
                     import datetime as _dt
-                    open_dt = _dt.datetime.utcfromtimestamp(pos.time)
+                    open_dt = _dt.datetime.fromtimestamp(pos.time, _dt.timezone.utc).replace(tzinfo=None)
                     since_entry = candles_df[candles_df['Time'] >= open_dt]
 
                     went_into_profit = False

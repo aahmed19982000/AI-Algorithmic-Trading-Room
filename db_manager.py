@@ -425,16 +425,16 @@ def log_trade_open(ticket, symbol, action, volume, entry_price, sl, tp, reason, 
     if not open_time:
         try:
             import MetaTrader5 as mt5
-            from datetime import datetime
+            from datetime import datetime, timezone
             positions = mt5.positions_get(ticket=ticket) if ticket else None
             if positions and len(positions) > 0 and positions[0].time > 0:
-                open_time = datetime.utcfromtimestamp(positions[0].time).strftime('%Y-%m-%d %H:%M:%S')
+                open_time = datetime.fromtimestamp(positions[0].time, timezone.utc).replace(tzinfo=None).strftime('%Y-%m-%d %H:%M:%S')
             else:
                 tick = mt5.symbol_info_tick(symbol) if symbol else None
                 if tick and tick.time > 0:
-                    open_time = datetime.utcfromtimestamp(tick.time).strftime('%Y-%m-%d %H:%M:%S')
+                    open_time = datetime.fromtimestamp(tick.time, timezone.utc).replace(tzinfo=None).strftime('%Y-%m-%d %H:%M:%S')
                 else:
-                    open_time = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+                    open_time = datetime.now(timezone.utc).replace(tzinfo=None).strftime('%Y-%m-%d %H:%M:%S')
         except Exception:
             open_time = time.strftime('%Y-%m-%d %H:%M:%S')
 
@@ -458,14 +458,14 @@ def log_trade_close(ticket, close_price, profit, exit_reason=None, close_time=No
     if not close_time:
         try:
             import MetaTrader5 as mt5
-            from datetime import datetime
+            from datetime import datetime, timezone
             trade_info = get_trade_by_ticket(ticket)
             symbol = trade_info.get("symbol") if trade_info else None
             tick = mt5.symbol_info_tick(symbol) if symbol else None
             if tick and tick.time > 0:
-                close_time = datetime.utcfromtimestamp(tick.time).strftime('%Y-%m-%d %H:%M:%S')
+                close_time = datetime.fromtimestamp(tick.time, timezone.utc).replace(tzinfo=None).strftime('%Y-%m-%d %H:%M:%S')
             else:
-                close_time = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+                close_time = datetime.now(timezone.utc).replace(tzinfo=None).strftime('%Y-%m-%d %H:%M:%S')
         except Exception:
             close_time = time.strftime('%Y-%m-%d %H:%M:%S')
 
