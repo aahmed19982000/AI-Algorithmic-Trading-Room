@@ -88,10 +88,30 @@ def run_backtest_elliott_wave(df, symbol, lookback=100, min_retracement=0.382, m
                 (basket["type"] == "SELL" and high_curr > basket["wave1"])
             )
 
+            # Calculate 50% breakeven & 90% early close targets
+            tp_dist = basket["tp"] - basket["entry"] if basket["type"] == "BUY" else basket["entry"] - basket["tp"]
+            
+            # Check 50% Breakeven (Move SL to Entry)
+            if basket["type"] == "BUY":
+                current_dist_max = high_curr - basket["entry"]
+            else:
+                current_dist_max = basket["entry"] - low_curr
+            
+            pct_reached_max = current_dist_max / tp_dist if tp_dist > 0 else 0.0
+            
+            if pct_reached_max >= 0.50 and not basket.get("breakeven_triggered", False):
+                basket["sl"] = basket["entry"]
+                basket["breakeven_triggered"] = True
+
+            # Check 90% Early Close level
+            tp_90_level = basket["entry"] + 0.90 * (basket["tp"] - basket["entry"]) if basket["type"] == "BUY" else basket["entry"] - 0.90 * (basket["entry"] - basket["tp"])
+
             hit_sl = (basket["type"] == "BUY" and low_curr <= basket["sl"]) or \
                      (basket["type"] == "SELL" and high_curr >= basket["sl"])
             hit_tp = (basket["type"] == "BUY" and high_curr >= basket["tp"]) or \
                      (basket["type"] == "SELL" and low_curr <= basket["tp"])
+            hit_tp_90 = (basket["type"] == "BUY" and high_curr >= tp_90_level) or \
+                         (basket["type"] == "SELL" and low_curr <= tp_90_level)
 
             if hit_sl or invalidated:
                 exit_price = basket["sl"] if hit_sl else close_curr
@@ -99,6 +119,12 @@ def run_backtest_elliott_wave(df, symbol, lookback=100, min_retracement=0.382, m
                 trades.append({"type": basket["type"], "entry_time": basket["open_time"], "exit_time": current_time,
                                "volume": basket["vol"], "profit_usd_raw": profit_usd,
                                "result": "WIN" if profit_usd >= 0 else "LOSS"})
+                sim_balance += profit_usd
+                basket = None
+            elif hit_tp_90:
+                profit_usd = ((tp_90_level - basket["entry"]) if basket["type"] == "BUY" else (basket["entry"] - tp_90_level)) * basket["vol"] * contract_size_usd
+                trades.append({"type": basket["type"], "entry_time": basket["open_time"], "exit_time": current_time,
+                               "volume": basket["vol"], "profit_usd_raw": profit_usd, "result": "WIN"})
                 sim_balance += profit_usd
                 basket = None
             elif hit_tp:
