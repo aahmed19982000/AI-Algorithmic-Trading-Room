@@ -11,6 +11,8 @@ sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 import os
 import json
 from dotenv import load_dotenv
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
 import google.generativeai as genai
 from db_manager import get_settings, get_trade_history
 
