@@ -559,6 +559,22 @@ def calculate_adx(df, period=14):
     return adx
 
 
+def _find_matching_pair(pivots, tolerance_pct):
+    """Anchors on the most recent pivot, then scans backward for the nearest
+    earlier one within tolerance_pct of it. Returns ((older_idx, older_val),
+    (newer_idx, newer_val)), or None if no earlier pivot in the list matches."""
+    if len(pivots) < 2:
+        return None
+    newer_idx, newer_val = pivots[-1]
+    for older_idx, older_val in reversed(pivots[:-1]):
+        m = min(newer_val, older_val)
+        if m <= 0:
+            continue
+        if abs(newer_val - older_val) / m * 100.0 <= tolerance_pct:
+            return (older_idx, older_val), (newer_idx, newer_val)
+    return None
+
+
 def detect_range_zone(df, lookback=100, window=5, peak_tolerance_pct=0.15, trough_tolerance_pct=0.15,
                        min_range_pct=0.3, max_range_pct=3.0):
     """
@@ -599,25 +615,16 @@ def detect_range_zone(df, lookback=100, window=5, peak_tolerance_pct=0.15, troug
     window_highs = [p for p in pivots_high if lookback_start <= p[0] <= last_idx]
     window_lows = [p for p in pivots_low if lookback_start <= p[0] <= last_idx]
 
-    if len(window_highs) < 2 or len(window_lows) < 2:
+    peak_match = _find_matching_pair(window_highs, peak_tolerance_pct)
+    if peak_match is None:
         return None
-
-    peak_a_idx, peak_a = window_highs[-2]
-    peak_b_idx, peak_b = window_highs[-1]
-    peak_min = min(peak_a, peak_b)
-    if peak_min <= 0:
-        return None
-    if abs(peak_a - peak_b) / peak_min * 100.0 > peak_tolerance_pct:
-        return None
+    (peak_a_idx, peak_a), (peak_b_idx, peak_b) = peak_match
     range_top = max(peak_a, peak_b)
 
-    trough_a_idx, trough_a = window_lows[-2]
-    trough_b_idx, trough_b = window_lows[-1]
-    trough_min = min(trough_a, trough_b)
-    if trough_min <= 0:
+    trough_match = _find_matching_pair(window_lows, trough_tolerance_pct)
+    if trough_match is None:
         return None
-    if abs(trough_a - trough_b) / trough_min * 100.0 > trough_tolerance_pct:
-        return None
+    (trough_a_idx, trough_a), (trough_b_idx, trough_b) = trough_match
     range_bottom = min(trough_a, trough_b)
 
     if range_top <= range_bottom:
