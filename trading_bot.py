@@ -61,6 +61,8 @@ last_range_check_candle = {}  # per-ticket completed-candle time of the last Ran
 last_range_check_result = {}  # per-ticket cached Range Trading invalidation result for that candle
 last_classical_check_candle = {}  # per-ticket completed-candle time of the last Classical Patterns invalidation check
 last_classical_check_result = {}  # per-ticket cached Classical Patterns invalidation result for that candle
+last_sma5_momentum_check_candle = {}  # per-ticket completed-candle time of the last SMA5 Momentum invalidation check
+last_sma5_momentum_check_result = {}  # per-ticket cached SMA5 Momentum invalidation result for that candle
 
 
 def get_db_connection():
@@ -473,20 +475,33 @@ def check_technical_strategy_signals(df, symbol):
     return "HOLD", "Technical Hold - " + " & ".join(reasons)
 
 
-def check_sma5_reversion_signal(df, current_price, threshold_pct=0.3, rsi_overbought=65.0, rsi_oversold=35.0):
+def check_sma5_reversion_signal(df, current_price, threshold_pct=0.3, rsi_overbought=65.0, rsi_oversold=35.0,
+                                 adx=None, adx_threshold=25.0):
     """
-    Mean-reversion signal: compares the live current price against the SMA(5)
-    of the last 5 completed candles. A large enough deviation is read as price
-    being "stretched" away from its short-term average, betting it reverts
-    back toward that average. Confirmed with RSI(14): only take the trade if
-    momentum is genuinely exhausted (overbought/oversold), not just mid-trend.
+    Regime-aware SMA(5) deviation signal: compares the live current price
+    against the SMA(5) of the last 5 completed candles, confirmed with
+    RSI(14) exhaustion, exactly as before. What differs is how the deviation
+    is interpreted, gated by ADX (trend-strength regime):
+
+    - ADX < adx_threshold (ranging): reversion mode — bet the stretch snaps
+      back toward SMA5 (SELL when overbought, BUY when oversold). Original
+      behavior, unchanged.
+    - ADX >= adx_threshold (trending): momentum mode — in a genuine trend,
+      "overbought"/"oversold" is confirmation the trend is intact, not
+      exhaustion, so trade *with* the deviation instead of fading it (BUY
+      when overbought, SELL when oversold).
+
+    NaN ADX (insufficient warmup) is treated as reversion mode (the original,
+    better-tested behavior) rather than silently misrouting into momentum.
 
     Returns:
-        (decision, reason, sma5): decision is "BUY"/"SELL"/"HOLD"; sma5 is the
-        computed SMA(5) value (or None if not enough data), used as the TP target.
+        (decision, reason, sma5, mode): decision is "BUY"/"SELL"/"HOLD"; sma5
+        is the computed SMA(5) value (or None if not enough data); mode is
+        "reversion" or "momentum" (None when decision is "HOLD" from lack of
+        data), used by the caller to build the right TP/SL and tag the trade.
     """
     if len(df) < 20:
-        return "HOLD", f"Not enough candle data for SMA5+RSI14 ({len(df)} candles, minimum 20 required).", None
+        return "HOLD", f"Not enough candle data for SMA5+RSI14 ({len(df)} candles, minimum 20 required).", None, None
 
     sma5 = df['Close'].iloc[-6:-1].mean()  # last 5 completed candles
     deviation_pct = (current_price - sma5) / sma5 * 100.0
@@ -496,16 +511,24 @@ def check_sma5_reversion_signal(df, current_price, threshold_pct=0.3, rsi_overbo
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rsi14 = (100 - (100 / (1 + gain / loss))).iloc[-2]  # last completed candle
 
+    import pandas as pd
+    trending = adx is not None and pd.notna(adx) and adx >= adx_threshold
+    mode = "momentum" if trending else "reversion"
+
     if deviation_pct >= threshold_pct:
         if rsi14 < rsi_overbought:
-            return "HOLD", f"Deviation {deviation_pct:.2f}% above SMA5 but RSI14 ({rsi14:.1f}) not overbought (>{rsi_overbought}) — momentum not exhausted.", sma5
-        return "SELL", f"Price {deviation_pct:.2f}% above SMA5 ({sma5:.5f}), RSI14 {rsi14:.1f} confirms overbought — expecting reversion down.", sma5
+            return "HOLD", f"Deviation {deviation_pct:.2f}% above SMA5 but RSI14 ({rsi14:.1f}) not overbought (>{rsi_overbought}) — momentum not exhausted.", sma5, None
+        if trending:
+            return "BUY", f"Price {deviation_pct:.2f}% above SMA5 ({sma5:.5f}), RSI14 {rsi14:.1f} overbought, ADX {adx:.1f} >= {adx_threshold} confirms trend — trading momentum, not fading it.", sma5, mode
+        return "SELL", f"Price {deviation_pct:.2f}% above SMA5 ({sma5:.5f}), RSI14 {rsi14:.1f} confirms overbought — expecting reversion down.", sma5, mode
     elif deviation_pct <= -threshold_pct:
         if rsi14 > rsi_oversold:
-            return "HOLD", f"Deviation {abs(deviation_pct):.2f}% below SMA5 but RSI14 ({rsi14:.1f}) not oversold (<{rsi_oversold}) — momentum not exhausted.", sma5
-        return "BUY", f"Price {abs(deviation_pct):.2f}% below SMA5 ({sma5:.5f}), RSI14 {rsi14:.1f} confirms oversold — expecting reversion up.", sma5
+            return "HOLD", f"Deviation {abs(deviation_pct):.2f}% below SMA5 but RSI14 ({rsi14:.1f}) not oversold (<{rsi_oversold}) — momentum not exhausted.", sma5, None
+        if trending:
+            return "SELL", f"Price {abs(deviation_pct):.2f}% below SMA5 ({sma5:.5f}), RSI14 {rsi14:.1f} oversold, ADX {adx:.1f} >= {adx_threshold} confirms trend — trading momentum, not fading it.", sma5, mode
+        return "BUY", f"Price {abs(deviation_pct):.2f}% below SMA5 ({sma5:.5f}), RSI14 {rsi14:.1f} confirms oversold — expecting reversion up.", sma5, mode
     else:
-        return "HOLD", f"Deviation {deviation_pct:.2f}% below {threshold_pct}% threshold.", sma5
+        return "HOLD", f"Deviation {deviation_pct:.2f}% below {threshold_pct}% threshold.", sma5, None
 
 
 def check_range_trading_signal(df, current_price, range_info, adx_period=14, adx_threshold=25.0,
@@ -663,6 +686,40 @@ def check_range_trading_invalidation(symbol, ticket, mode, range_top, range_bott
 
     last_range_check_candle[cache_key] = current_candle_time
     last_range_check_result[cache_key] = invalidated
+    return invalidated
+
+
+def check_sma5_momentum_invalidation(symbol, ticket, timeframe_str, adx_threshold, adx_period=14):
+    """
+    Post-entry invalidation check for an SMA5 Momentum position, cached per
+    completed candle — same idiom as check_range_trading_invalidation.
+
+    A momentum trade bets the trend that justified trading *with* the SMA5
+    deviation (instead of fading it) keeps going. If ADX drops back below the
+    entry threshold, that trend has exhausted and the momentum premise is now
+    false — invalidate rather than wait for the far measured-move TP or the
+    SMA5-anchored SL.
+
+    Returns True if the position should be closed now.
+    """
+    import pandas as pd
+    global last_sma5_momentum_check_candle, last_sma5_momentum_check_result
+
+    resolved_timeframe = timeframe_str or DEFAULT_TIMEFRAME
+    df = get_candles(symbol=symbol, timeframe=get_timeframe(resolved_timeframe), count=max(adx_period * 3, 50))
+    if df is None or len(df) < 20:
+        return False
+    df = df.reset_index(drop=True)
+
+    current_candle_time = str(df['Time'].iloc[-1])
+    if last_sma5_momentum_check_candle.get(ticket) == current_candle_time:
+        return last_sma5_momentum_check_result.get(ticket, False)
+
+    adx_raw = calculate_adx(df, period=adx_period).iloc[-2]
+    invalidated = not pd.isna(adx_raw) and float(adx_raw) < adx_threshold
+
+    last_sma5_momentum_check_candle[ticket] = current_candle_time
+    last_sma5_momentum_check_result[ticket] = invalidated
     return invalidated
 
 
@@ -1190,7 +1247,47 @@ def manage_active_positions_grid():
                 if any_closed:
                     continue
 
-            # 2.8 SMA5 Reversion: Dynamic Trailing TP to SMA5 (with spread adjustment) & Entry Point Exit
+            # 2.8 SMA5 Momentum invalidation: if ADX has fallen back below the
+            # entry threshold, the trend that justified trading *with* the
+            # deviation (instead of fading it) has exhausted — the momentum
+            # premise is now false, so close rather than wait for the far
+            # measured-move TP or the SMA5-anchored SL. Cached per completed
+            # candle inside check_sma5_momentum_invalidation. Reversion-mode
+            # SMA5 positions don't carry an ADX-based premise to invalidate —
+            # they're handled separately below (2.9).
+            if is_sma5_trade:
+                import json
+                from db_manager import get_trade_by_ticket
+
+                any_closed = False
+                sma5_adx_period = int(settings.get("sma5_reversion_adx_period", 14))
+                sma5_adx_threshold = float(settings.get("sma5_reversion_adx_threshold", 25.0))
+                for pos in pos_list:
+                    if "sma5" not in (pos.comment or "").lower():
+                        continue
+                    trade_row = get_trade_by_ticket(pos.ticket)
+                    if not trade_row or not trade_row.get("gann_data"):
+                        continue
+                    try:
+                        sma5_context = json.loads(trade_row["gann_data"])
+                    except Exception:
+                        continue
+                    if sma5_context.get("mode") != "momentum":
+                        continue
+                    pos_timeframe = sma5_context.get("timeframe")
+                    if check_sma5_momentum_invalidation(symbol, pos.ticket, pos_timeframe, sma5_adx_threshold, adx_period=sma5_adx_period):
+                        print(f"[SMA5 MOMENTUM INVALIDATION] ADX regime-break (trend exhausted) on {symbol} (ticket #{pos.ticket}). Closing.")
+                        close_res = close_position(ticket=pos.ticket, comment="SMA5 Momentum Invalidation")
+                        if close_res:
+                            log_trade_close(pos.ticket, current_price, pos.profit, exit_reason="SMA5 Momentum invalidation: ADX regime-break")
+                            any_closed = True
+                if any_closed:
+                    continue
+
+            # 2.9 SMA5 Reversion: Dynamic Trailing TP to SMA5 (with spread adjustment) & Entry Point Exit.
+            # Momentum-mode positions are skipped here (handled by 2.8 above) — a
+            # trailing target back to SMA5 would fight the measured-move TP that's
+            # deliberately projected away from it.
             if is_sma5_trade:
                 import json
                 from db_manager import get_trade_by_ticket
@@ -1203,12 +1300,16 @@ def manage_active_positions_grid():
 
                     trade_row = get_trade_by_ticket(pos.ticket)
                     pos_tf = DEFAULT_TIMEFRAME
+                    pos_mode = "reversion"
                     if trade_row and trade_row.get("gann_data"):
                         try:
                             gdata = json.loads(trade_row["gann_data"])
                             pos_tf = gdata.get("timeframe", DEFAULT_TIMEFRAME)
+                            pos_mode = gdata.get("mode", "reversion")
                         except Exception:
                             pass
+                    if pos_mode == "momentum":
+                        continue
 
                     candles_df = get_candles(symbol=symbol, timeframe=get_timeframe(pos_tf), count=30)
                     if candles_df is None or len(candles_df) < 5:
@@ -1370,6 +1471,9 @@ def manage_sma5_reversion_strategy(settings, active_news_events, risk_percent, a
     rsi_overbought = float(settings.get("sma5_reversion_rsi_overbought", 65.0))
     rsi_oversold = float(settings.get("sma5_reversion_rsi_oversold", 35.0))
     min_tp_spread_multiple = float(settings.get("sma5_reversion_min_tp_spread_multiple", 2.0))
+    adx_period = int(settings.get("sma5_reversion_adx_period", 14))
+    adx_threshold = float(settings.get("sma5_reversion_adx_threshold", 25.0))
+    momentum_tp_multiplier = float(settings.get("sma5_reversion_momentum_tp_multiplier", 2.0))
     # SMA5 reversion strategy is strictly restricted to H1 (1 Hour) timeframe
     scan_timeframes = ["H1"]
 
@@ -1389,10 +1493,17 @@ def manage_sma5_reversion_strategy(settings, active_news_events, risk_percent, a
                     continue
 
                 mid_price = (price_info['bid'] + price_info['ask']) / 2.0
-                decision, reason, sma5 = check_sma5_reversion_signal(candles_df, mid_price, threshold_pct, rsi_overbought, rsi_oversold)
+                adx_series = calculate_adx(candles_df, period=adx_period)
+                adx_now = adx_series.iloc[-2]  # last completed candle, matches RSI's -2 convention
+                decision, reason, sma5, mode = check_sma5_reversion_signal(
+                    candles_df, mid_price, threshold_pct, rsi_overbought, rsi_oversold,
+                    adx=adx_now, adx_threshold=adx_threshold
+                )
 
                 if decision == "HOLD":
                     continue
+
+                label = "Momentum" if mode == "momentum" else "Reversion"
 
                 # Duplicate same-direction entry guard
                 symbol_positions = [
@@ -1414,10 +1525,21 @@ def manage_sma5_reversion_strategy(settings, active_news_events, risk_percent, a
                 entry_price = price_info['ask'] if decision == "BUY" else price_info['bid']
                 spread = price_info['ask'] - price_info['bid']
                 deviation_distance = abs(entry_price - sma5)
-                sl_distance = sl_multiplier * deviation_distance
-                sl = entry_price - sl_distance if decision == "BUY" else entry_price + sl_distance
-                # Account for spread: BUY closes at Bid (TP=sma5), SELL closes at Ask (TP=sma5+spread)
-                tp = sma5 if decision == "BUY" else (sma5 + spread)
+
+                if mode == "momentum":
+                    # SL sits at SMA5 itself — the invalidation level (a genuine trend
+                    # shouldn't fall back through its own short-term average). Same
+                    # close-side spread adjustment convention as the reversion TP below
+                    # (BUY closes at Bid, SELL closes at Ask). TP is a measured-move
+                    # projection: entry + multiplier * (distance already covered from SMA5).
+                    sl = sma5 if decision == "BUY" else (sma5 + spread)
+                    tp = (entry_price + momentum_tp_multiplier * deviation_distance if decision == "BUY"
+                          else entry_price - momentum_tp_multiplier * deviation_distance)
+                else:
+                    sl_distance = sl_multiplier * deviation_distance
+                    sl = entry_price - sl_distance if decision == "BUY" else entry_price + sl_distance
+                    # Account for spread: BUY closes at Bid (TP=sma5), SELL closes at Ask (TP=sma5+spread)
+                    tp = sma5 if decision == "BUY" else (sma5 + spread)
 
                 sl = round(sl, symbol_info.digits)
                 tp = round(tp, symbol_info.digits)
@@ -1425,7 +1547,7 @@ def manage_sma5_reversion_strategy(settings, active_news_events, risk_percent, a
                 sl_dist = abs(entry_price - sl)
                 tp_dist = abs(tp - entry_price)
                 if sl_dist <= 0:
-                    print(f"[SMA5 REVERSION] {symbol} ({timeframe_str}) rejected: Stop Loss at or ahead of entry price.")
+                    print(f"[SMA5 {label.upper()}] {symbol} ({timeframe_str}) rejected: Stop Loss at or ahead of entry price.")
                     continue
 
                 # Spread guard: MT5 closes a BUY at Bid and a SELL at Ask, not at the mid-price
@@ -1435,22 +1557,22 @@ def manage_sma5_reversion_strategy(settings, active_news_events, risk_percent, a
                 # close at all. Require the target to be at least a configurable multiple of spread.
                 spread = price_info['ask'] - price_info['bid']
                 if tp_dist < spread * min_tp_spread_multiple:
-                    print(f"[SMA5 REVERSION] {symbol} ({timeframe_str}) rejected: TP distance ({tp_dist:.5f}) too small relative to spread ({spread:.5f}) — would rarely/never close at target.")
+                    print(f"[SMA5 {label.upper()}] {symbol} ({timeframe_str}) rejected: TP distance ({tp_dist:.5f}) too small relative to spread ({spread:.5f}) — would rarely/never close at target.")
                     continue
 
                 rr_ratio = tp_dist / sl_dist
                 if rr_ratio < min_rr_ratio:
-                    print(f"[SMA5 REVERSION] {symbol} ({timeframe_str}) rejected: R:R 1:{rr_ratio:.2f} below strategy floor 1:{min_rr_ratio:.2f}.")
+                    print(f"[SMA5 {label.upper()}] {symbol} ({timeframe_str}) rejected: R:R 1:{rr_ratio:.2f} below strategy floor 1:{min_rr_ratio:.2f}.")
                     continue
 
                 volume = calculate_lot_size(symbol, sl, entry_price, risk_percent=risk_percent)
-                reason_msg = f"SMA5 Reversion ({timeframe_str}): {reason}"
+                reason_msg = f"SMA5 {label} ({timeframe_str}): {reason}"
 
                 if not auto_trade_enabled:
-                    print(f"[SMA5 REVERSION] Signal-Only Mode: {decision} on {symbol} ({timeframe_str}) at {entry_price} (SL: {sl}, TP: {tp}). Not executed.")
+                    print(f"[SMA5 {label.upper()}] Signal-Only Mode: {decision} on {symbol} ({timeframe_str}) at {entry_price} (SL: {sl}, TP: {tp}). Not executed.")
                     last_scan_reports[f"{symbol}_sma5_{timeframe_str}"] = {
                         "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
-                        "status": "Signal Only (SMA5)",
+                        "status": f"Signal Only (SMA5 {label})",
                         "details": reason_msg,
                         "structure": None
                     }
@@ -1463,7 +1585,7 @@ def manage_sma5_reversion_strategy(settings, active_news_events, risk_percent, a
                     sl=sl,
                     tp=tp,
                     magic=MAGIC_NUMBER,
-                    comment=f"SMA5 Reversion {decision}"[:28]
+                    comment=f"SMA5 {label} {decision}"[:28]
                 )
 
                 if trade_res and trade_res["success"]:
@@ -1476,12 +1598,12 @@ def manage_sma5_reversion_strategy(settings, active_news_events, risk_percent, a
                         sl=sl,
                         tp=tp,
                         reason=reason_msg,
-                        gann_data={"timeframe": timeframe_str}
+                        gann_data={"timeframe": timeframe_str, "mode": mode}
                     )
-                    print(f"[SMA5 REVERSION] Executed {decision} {volume} lots on {symbol} ({timeframe_str}) at {trade_res['price']} (SL: {sl}, TP: {tp}). Ticket: {trade_res['ticket']}.")
+                    print(f"[SMA5 {label.upper()}] Executed {decision} {volume} lots on {symbol} ({timeframe_str}) at {trade_res['price']} (SL: {sl}, TP: {tp}). Ticket: {trade_res['ticket']}.")
                     last_scan_reports[f"{symbol}_sma5_{timeframe_str}"] = {
                         "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
-                        "status": f"Executed {decision} (SMA5)",
+                        "status": f"Executed {decision} (SMA5 {label})",
                         "details": reason_msg,
                         "structure": None
                     }
@@ -1527,7 +1649,7 @@ def manage_sma5_reversion_strategy(settings, active_news_events, risk_percent, a
                     except Exception as tg_ex:
                         print(f"[TELEGRAM] [ERROR] Failed to send SMA5 reversion open alert: {tg_ex}")
                 else:
-                    print(f"[SMA5 REVERSION] [ERROR] Failed to execute trade order for {symbol} ({timeframe_str}).")
+                    print(f"[SMA5 {label.upper()}] [ERROR] Failed to execute trade order for {symbol} ({timeframe_str}).")
             except Exception as sma5_ex:
                 print(f"[SMA5 REVERSION] [ERROR] {symbol} ({timeframe_str}): {sma5_ex}")
 

@@ -179,6 +179,9 @@ def init_db():
         "sma5_reversion_rsi_overbought": "65.0",
         "sma5_reversion_rsi_oversold": "35.0",
         "sma5_reversion_min_tp_spread_multiple": "2.0",
+        "sma5_reversion_adx_period": "14",
+        "sma5_reversion_adx_threshold": "45.0",
+        "sma5_reversion_momentum_tp_multiplier": "2.0",
         "elliott_wave_enabled": "1",
         "elliott_wave_symbols": json.dumps([
             "XAUUSDm", "USDJPYm", "GBPNZDm", "EURJPYm", "NZDCHFm",
