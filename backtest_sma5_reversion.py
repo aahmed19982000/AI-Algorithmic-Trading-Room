@@ -26,7 +26,8 @@ load_dotenv()
 
 def run_backtest_sma5_reversion(df, symbol, threshold_pct=0.3, sl_multiplier=1.5, min_rr_ratio=0.5,
                                  rsi_overbought=65.0, rsi_oversold=35.0, min_tp_spread_multiple=2.0,
-                                 adx_period=14, adx_threshold=25.0, momentum_tp_multiplier=2.0):
+                                 adx_period=14, adx_threshold=25.0, momentum_tp_multiplier=2.0,
+                                 momentum_enabled=True):
     symbol_info = mt5.symbol_info(symbol)
     if symbol_info is None:
         print(f"[ERROR] Symbol {symbol} not found in MT5.")
@@ -136,8 +137,9 @@ def run_backtest_sma5_reversion(df, symbol, threshold_pct=0.3, sl_multiplier=1.5
         # ADX-regime gate, mirrors check_sma5_reversion_signal(): ranging (ADX <
         # threshold, or NaN during warmup) keeps the original fade behavior;
         # trending (ADX >= threshold) flips to trading with the deviation instead
-        # of fading it.
-        trending = pd.notna(adx_now) and adx_now >= adx_threshold
+        # of fading it. momentum_enabled=False forces reversion-only regardless of
+        # ADX — mirrors trading_bot.py gating momentum to sma5_reversion_momentum_symbols.
+        trending = momentum_enabled and pd.notna(adx_now) and adx_now >= adx_threshold
         mode = "momentum" if trending else "reversion"
 
         if deviation_pct >= threshold_pct:
@@ -250,8 +252,11 @@ def main():
     parser.add_argument("--adx-period", type=int, default=14, help="ADX smoothing period")
     parser.add_argument("--adx-threshold", type=float, default=45.0, help="ADX level at/above which the strategy switches from fading the deviation (reversion) to trading with it (momentum) — 45 validated better than 25 in backtesting; a low threshold misclassifies too many normal reversion setups as momentum")
     parser.add_argument("--momentum-tp-multiplier", type=float, default=2.0, help="Momentum-mode TP distance as a multiple of the entry deviation-from-SMA5 distance")
+    parser.add_argument("--momentum-symbols", type=str, default="BTCUSDm,ETHUSDm,SOLUSDm,XRPUSDm",
+                         help="Comma-separated symbols allowed to use momentum mode (matches sma5_reversion_momentum_symbols live default); every other symbol stays reversion-only regardless of ADX. Pass an empty string to disable momentum entirely.")
 
     args = parser.parse_args()
+    momentum_symbols = {s.strip() for s in args.momentum_symbols.split(",") if s.strip()}
 
     if not connect_mt5():
         print("[FATAL] Could not connect to MT5.")
@@ -277,7 +282,8 @@ def main():
                 min_tp_spread_multiple=args.min_tp_spread_multiple,
                 adx_period=args.adx_period,
                 adx_threshold=args.adx_threshold,
-                momentum_tp_multiplier=args.momentum_tp_multiplier
+                momentum_tp_multiplier=args.momentum_tp_multiplier,
+                momentum_enabled=sym in momentum_symbols
             )
             results[sym] = trades
             print_sma5_report(trades, sym, args.timeframe)

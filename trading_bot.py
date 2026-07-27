@@ -1474,6 +1474,10 @@ def manage_sma5_reversion_strategy(settings, active_news_events, risk_percent, a
     adx_period = int(settings.get("sma5_reversion_adx_period", 14))
     adx_threshold = float(settings.get("sma5_reversion_adx_threshold", 25.0))
     momentum_tp_multiplier = float(settings.get("sma5_reversion_momentum_tp_multiplier", 2.0))
+    # Momentum mode only backtested well on trend-prone symbols (crypto) — on the
+    # more range-bound pairs it clipped profitable reversion trades instead. Gate
+    # it to this subset; every other symbol stays reversion-only regardless of ADX.
+    momentum_symbols = set(settings.get("sma5_reversion_momentum_symbols", []))
     # SMA5 reversion strategy is strictly restricted to H1 (1 Hour) timeframe
     scan_timeframes = ["H1"]
 
@@ -1493,8 +1497,10 @@ def manage_sma5_reversion_strategy(settings, active_news_events, risk_percent, a
                     continue
 
                 mid_price = (price_info['bid'] + price_info['ask']) / 2.0
-                adx_series = calculate_adx(candles_df, period=adx_period)
-                adx_now = adx_series.iloc[-2]  # last completed candle, matches RSI's -2 convention
+                adx_now = None
+                if symbol in momentum_symbols:
+                    adx_series = calculate_adx(candles_df, period=adx_period)
+                    adx_now = adx_series.iloc[-2]  # last completed candle, matches RSI's -2 convention
                 decision, reason, sma5, mode = check_sma5_reversion_signal(
                     candles_df, mid_price, threshold_pct, rsi_overbought, rsi_oversold,
                     adx=adx_now, adx_threshold=adx_threshold

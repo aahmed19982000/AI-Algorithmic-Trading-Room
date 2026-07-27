@@ -182,6 +182,15 @@ def init_db():
         "sma5_reversion_adx_period": "14",
         "sma5_reversion_adx_threshold": "45.0",
         "sma5_reversion_momentum_tp_multiplier": "2.0",
+        # Momentum mode (ADX-adaptive flip) only pays off on trend-prone symbols —
+        # backtesting a full year of H1 data showed it clearly helps crypto (BTC/ETH/
+        # SOL/XRP, which trended hard) but hurts the more range-bound JPY/CHF/CAD
+        # pairs and USOILm, where pure reversion already outperforms. Restricting
+        # momentum to this subset keeps the rest on the original, better-tested
+        # reversion-only behavior.
+        "sma5_reversion_momentum_symbols": json.dumps([
+            "BTCUSDm", "ETHUSDm", "SOLUSDm", "XRPUSDm"
+        ]),
         "elliott_wave_enabled": "1",
         "elliott_wave_symbols": json.dumps([
             "XAUUSDm", "USDJPYm", "GBPNZDm", "EURJPYm", "NZDCHFm",
