@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="en" translate="no">
+<head>
+    <meta charset="UTF-8">
+    <meta name="google" content="notranslate">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Elliott Wave Analyzer | AI Algorithmic Trading Room</title>
+
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Cairo:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <style>
+        :root {
+            --bg-color: #0b0c10;
+            --surface-color: rgba(26, 29, 38, 0.65);
+            --primary-color: #6c5ce7;
+            --primary-hover: #5b4bc4;
+            --accent-color: #00cec9;
+            --text-color: #f5f6fa;
+            --text-secondary: #a0a8c0;
+            --success-color: #2ecc71;
+            --danger-color: #e74c3c;
+            --warning-color: #f1c40f;
+            --border-color: rgba(255, 255, 255, 0.08);
+            --font-family: 'Outfit', 'Cairo', sans-serif;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            background-color: var(--bg-color);
+            background-image:
+                radial-gradient(at 10% 20%, rgba(108, 92, 231, 0.15) 0px, transparent 50%),
+                radial-gradient(at 90% 80%, rgba(0, 206, 201, 0.1) 0px, transparent 50%);
+            background-attachment: fixed;
+            color: var(--text-color);
+            font-family: var(--font-family);
+            min-height: 100vh;
+            padding: 30px;
+            overflow-x: hidden;
+        }
+
+        .page-container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .panel {
+            background: var(--surface-color);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid var(--border-color);
+            border-radius: 20px;
+            padding: 25px;
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+            margin-bottom: 25px;
+        }
+
+        h2 {
+            font-size: 1.3rem;
+            font-weight: 600;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 10px;
+        }
+
+        h2 i { color: var(--primary-color); }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px 30px;
+            margin-bottom: 10px;
+            flex-wrap: wrap;
+            gap: 15px;
+        }
+
+        .logo-section h1 {
+            font-size: 2.2rem;
+            font-weight: 800;
+            background: linear-gradient(135deg, var(--text-color) 30%, var(--primary-color) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: -1px;
+        }
+
+        .logo-section p {
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+            margin-top: 2px;
+        }
+
+        .badge-info {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            background: rgba(0, 206, 201, 0.1);
+            border: 1px solid rgba(0, 206, 201, 0.3);
+            color: var(--accent-color);
+            border-radius: 30px;
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+
+        .nav-tabs {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 25px;
+            background: rgba(255, 255, 255, 0.03);
+            padding: 8px;
+            border-radius: 14px;
+            border: 1px solid var(--border-color);
+            width: fit-content;
+            flex-wrap: wrap;
+        }
+
+        .nav-tab {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 20px;
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-weight: 600;
+            border-radius: 10px;
+            transition: all 0.2s ease;
+        }
+
+        .nav-tab:hover { color: var(--text-color); background: rgba(255, 255, 255, 0.05); }
+        .nav-tab.active {
+            color: var(--text-color);
+            background: var(--primary-color);
+            box-shadow: 0 4px 15px rgba(108, 92, 231, 0.3);
+        }
+
+        button {
+            font-family: var(--font-family);
+            background-color: var(--primary-color);
+            color: var(--text-color);
+            border: none;
+            padding: 12px 24px;
+            font-weight: 600;
+            border-radius: 12px;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            transition: all 0.2s ease;
+        }
+
+        button:hover { background-color: var(--primary-hover); transform: translateY(-2px); }
+        button:disabled {
+            background-color: rgba(255, 255, 255, 0.1);
+            color: var(--text-secondary);
+            cursor: not-allowed;
+            transform: none !important;
+        }
+
+        .form-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .form-group { display: flex; flex-direction: column; gap: 8px; }
+
+        .form-group label {
+            font-weight: 600;
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+        }
+
+        input[type="text"], select {
+            width: 100%;
+            background-color: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 10px 14px;
+            color: var(--text-color);
+            font-family: var(--font-family);
+            font-size: 0.95rem;
+            transition: border-color 0.2s ease;
+        }
+
+        input[type="text"]:focus, select:focus { outline: none; border-color: var(--primary-color); }
+
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 15px;
+            margin-bottom: 25px;
+        }
+
+        .metric-card {
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 15px;
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+
+        .metric-card .label {
+            color: var(--text-secondary);
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+        }
+
+        .metric-card .value { font-size: 1.3rem; font-weight: 800; }
+        .metric-card.buy .value { color: var(--success-color); }
+        .metric-card.sell .value { color: var(--danger-color); }
+        .metric-card.highlight .value { color: var(--accent-color); }
+
+        .status-banner {
+            padding: 14px 20px;
+            border-radius: 12px;
+            font-weight: 600;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .status-banner.active { background: rgba(46, 204, 113, 0.1); border: 1px solid var(--success-color); color: var(--success-color); }
+        .status-banner.pending { background: rgba(241, 196, 15, 0.1); border: 1px solid var(--warning-color); color: var(--warning-color); }
+        .status-banner.stale { background: rgba(160, 168, 192, 0.1); border: 1px solid var(--text-secondary); color: var(--text-secondary); }
+        .status-banner.none { background: rgba(231, 76, 60, 0.1); border: 1px solid var(--danger-color); color: var(--danger-color); }
+
+        .chart-container {
+            border-radius: 12px;
+            overflow: hidden;
+            border: 1px solid var(--border-color);
+            box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+            min-height: 200px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(0,0,0,0.15);
+        }
+
+        .chart-container img { width: 100%; height: auto; display: block; }
+
+        .empty-state {
+            text-align: center;
+            padding: 60px 40px;
+            color: var(--text-secondary);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .empty-state i { font-size: 3rem; color: rgba(255, 255, 255, 0.05); }
+
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 5px solid rgba(255, 255, 255, 0.1);
+            border-top: 5px solid var(--primary-color);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 15px auto;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+        .toast {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            background: var(--primary-color);
+            color: var(--text-color);
+            padding: 16px 24px;
+            border-radius: 12px;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            z-index: 1000;
+            transform: translateY(100px);
+            opacity: 0;
+            transition: all 0.3s cubic-bezier(0.68, -0.55, 0.27, 1.55);
+        }
+        .toast.show { transform: translateY(0); opacity: 1; }
+
+        @media (max-width: 700px) {
+            body { padding: 12px; }
+            header { flex-direction: column; align-items: flex-start; padding: 15px 20px; }
+            .logo-section h1 { font-size: 1.6rem; }
+            .nav-tabs { width: 100%; overflow-x: auto; white-space: nowrap; flex-wrap: nowrap; }
+        }
+    </style>
+</head>
+<body class="notranslate">
+
+    <div class="page-container">
+
+        <header class="panel">
+            <div class="logo-section">
+                <h1>Elliott Wave Analyzer</h1>
+                <p>Standalone Wave 0 &rarr; 1 &rarr; 2 detector (Yahoo Finance data - no MT5 terminal required)</p>
+            </div>
+            <div class="badge-info">
+                <i class="fa-solid fa-circle-info"></i>
+                Works without MT5 - runs anywhere
+            </div>
+        </header>
+
+        <nav class="nav-tabs">
+            <a href="/" class="nav-tab"><i class="fa-solid fa-gauge"></i> Live Dashboard</a>
+            <a href="/backtest" class="nav-tab"><i class="fa-solid fa-vial"></i> Strategy Backtester</a>
+            <a href="/elliott-wave" class="nav-tab active"><i class="fa-solid fa-wave-square"></i> Elliott Wave Analyzer</a>
+            <a href="/portfolio" class="nav-tab"><i class="fa-solid fa-chart-pie"></i> Portfolio Report</a>
+            <a href="/bot-status" class="nav-tab"><i class="fa-solid fa-terminal"></i> Bot Activity Console</a>
+            <a href="/chat" class="nav-tab"><i class="fa-solid fa-comments"></i> AI Trade Analyst</a>
+        </nav>
+
+        <!-- Config Form -->
+        <div class="panel">
+            <h2><i class="fa-solid fa-sliders"></i> Analysis Parameters</h2>
+            <form id="ew-form" onsubmit="runAnalysis(event)">
+                <div class="form-grid">
+                    <div class="form-group">
+                        <label for="symbol">Symbol</label>
+                        <select id="symbol" required>
+                            <option value="EURUSD=X" selected>EURUSD (Euro / US Dollar)</option>
+                            <option value="GBPUSD=X">GBPUSD (Pound / US Dollar)</option>
+                            <option value="USDJPY=X">USDJPY (Dollar / Yen)</option>
+                            <option value="AUDUSD=X">AUDUSD (Aussie / US Dollar)</option>
+                            <option value="USDCHF=X">USDCHF (Dollar / Franc)</option>
+                            <option value="XAUUSD=X">XAUUSD (Gold / US Dollar)</option>
+                            <option value="BTC-USD">BTC-USD (Bitcoin)</option>
+                            <option value="ETH-USD">ETH-USD (Ethereum)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="interval">Timeframe</label>
+                        <select id="interval" required>
+                            <option value="30m">M30 (30 Minutes)</option>
+                            <option value="1h" selected>H1 (1 Hour)</option>
+                            <option value="4h">H4 (4 Hours)</option>
+                            <option value="1d">D1 (Daily)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="period">History Range</label>
+                        <select id="period" required>
+                            <option value="30d">30 Days</option>
+                            <option value="90d" selected>90 Days</option>
+                            <option value="180d">6 Months</option>
+                            <option value="1y">1 Year</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="lookback">Pivot Lookback (candles)</label>
+                        <input type="text" id="lookback" value="150" required>
+                    </div>
+                </div>
+                <button type="submit" id="btn-run" style="width: 100%; justify-content: center; font-size: 1.05rem;">
+                    <i class="fa-solid fa-magnifying-glass-chart"></i> Analyze Wave Structure
+                </button>
+            </form>
+        </div>
+
+        <!-- Loading -->
+        <div id="loading-panel" class="panel" style="display: none; text-align: center;">
+            <div class="spinner"></div>
+            <p style="font-weight: 600; letter-spacing: 0.5px;">Downloading candles and scanning for a Wave 0-1-2 structure...</p>
+        </div>
+
+        <!-- Results -->
+        <div id="results-section" style="display: none;">
+
+            <div id="status-banner" class="status-banner none"></div>
+
+            <div class="metrics-grid" id="metrics-grid" style="display: none;">
+                <div class="metric-card highlight" id="card-type">
+                    <span class="label">Setup Direction</span>
+                    <span class="value" id="res-type">-</span>
+                </div>
+                <div class="metric-card">
+                    <span class="label">Wave 0 (Start)</span>
+                    <span class="value" id="res-wave0">-</span>
+                </div>
+                <div class="metric-card">
+                    <span class="label">Wave 1 (Peak)</span>
+                    <span class="value" id="res-wave1">-</span>
+                </div>
+                <div class="metric-card">
+                    <span class="label">Wave 2 (Correction)</span>
+                    <span class="value" id="res-wave2">-</span>
+                </div>
+                <div class="metric-card highlight">
+                    <span class="label">Wave 3 Target (1.618x)</span>
+                    <span class="value" id="res-target">-</span>
+                </div>
+                <div class="metric-card">
+                    <span class="label">Wave 2 Retracement</span>
+                    <span class="value" id="res-retracement">-</span>
+                </div>
+                <div class="metric-card">
+                    <span class="label">Current Price</span>
+                    <span class="value" id="res-price">-</span>
+                </div>
+            </div>
+
+            <div class="panel">
+                <h2><i class="fa-solid fa-chart-line"></i> Wave Chart</h2>
+                <div class="chart-container">
+                    <img id="chart-img" src="" alt="Elliott Wave chart" style="display: none;">
+                </div>
+            </div>
+
+        </div>
+
+        <!-- Empty state -->
+        <div class="panel" id="empty-results">
+            <div class="empty-state">
+                <i class="fa-solid fa-wave-square"></i>
+                <h3>No analysis run yet</h3>
+                <p>Pick a symbol and timeframe above, then click "Analyze Wave Structure".</p>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="toast">
+        <i class="fa-solid fa-circle-check"></i>
+        <span id="toast-text">Success!</span>
+    </div>
+
+    <script>
+        function showToast(text, isError = false) {
+            const toast = document.getElementById('toast');
+            const toastText = document.getElementById('toast-text');
+            const icon = toast.querySelector('i');
+            toastText.textContent = text;
+            if (isError) {
+                toast.style.background = '#e74c3c';
+                icon.className = 'fa-solid fa-triangle-exclamation';
+            } else {
+                toast.style.background = '#6c5ce7';
+                icon.className = 'fa-solid fa-circle-check';
+            }
+            toast.classList.add('show');
+            setTimeout(() => toast.classList.remove('show'), 3000);
+        }
+
+        function fmtPrice(v) {
+            return typeof v === 'number' ? v.toFixed(5) : '-';
+        }
+
+        async function runAnalysis(e) {
+            e.preventDefault();
+
+            const btnRun = document.getElementById('btn-run');
+            const loadingPanel = document.getElementById('loading-panel');
+            const emptyResults = document.getElementById('empty-results');
+            const resultsSection = document.getElementById('results-section');
+
+            btnRun.disabled = true;
+            btnRun.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Analyzing...';
+            loadingPanel.style.display = 'block';
+            emptyResults.style.display = 'none';
+            resultsSection.style.display = 'none';
+
+            const payload = {
+                symbol: document.getElementById('symbol').value,
+                interval: document.getElementById('interval').value,
+                period: document.getElementById('period').value,
+                lookback: parseInt(document.getElementById('lookback').value) || 150
+            };
+
+            try {
+                const res = await fetch('/api/elliott-wave/analyze', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json();
+
+                if (!data.success) {
+                    showToast(data.error || "Analysis failed", true);
+                    emptyResults.style.display = 'block';
+                    return;
+                }
+
+                showToast("Analysis complete!");
+                resultsSection.style.display = 'block';
+
+                const img = document.getElementById('chart-img');
+                img.src = data.screenshot_url + '?t=' + Date.now();
+                img.style.display = 'block';
+
+                const banner = document.getElementById('status-banner');
+                const metricsGrid = document.getElementById('metrics-grid');
+
+                if (data.setup) {
+                    metricsGrid.style.display = 'grid';
+                    const s = data.setup;
+
+                    document.getElementById('res-type').textContent = s.type;
+                    document.getElementById('card-type').className = 'metric-card ' + (s.type === 'BUY' ? 'buy' : 'sell');
+                    document.getElementById('res-wave0').textContent = fmtPrice(s.wave0);
+                    document.getElementById('res-wave1').textContent = fmtPrice(s.wave1);
+                    document.getElementById('res-wave2').textContent = fmtPrice(s.wave2);
+                    document.getElementById('res-target').textContent = fmtPrice(s.wave3_target);
+                    document.getElementById('res-retracement').textContent = s.retracement_pct.toFixed(1) + '%';
+                    document.getElementById('res-price').textContent = fmtPrice(data.current_price);
+
+                    if (s.is_fresh && s.entry_confirmed) {
+                        banner.className = 'status-banner active';
+                        banner.innerHTML = '<i class="fa-solid fa-bolt"></i> ACTIVE SETUP - entry conditions currently met';
+                    } else if (s.is_fresh) {
+                        banner.className = 'status-banner pending';
+                        banner.innerHTML = '<i class="fa-solid fa-hourglass-half"></i> Setup fresh - awaiting reversal confirmation off Wave 2';
+                    } else {
+                        banner.className = 'status-banner stale';
+                        banner.innerHTML = '<i class="fa-solid fa-clock-rotate-left"></i> Most recent qualifying setup (not fresh) - informational only';
+                    }
+                } else {
+                    metricsGrid.style.display = 'none';
+                    document.getElementById('res-price').textContent = fmtPrice(data.current_price);
+                    banner.className = 'status-banner none';
+                    banner.innerHTML = '<i class="fa-solid fa-circle-xmark"></i> No qualifying Wave 0-1-2 setup found in the current lookback window';
+                }
+
+            } catch (err) {
+                console.error("Elliott Wave analysis error:", err);
+                showToast("Error communicating with the analysis server", true);
+                emptyResults.style.display = 'block';
+            } finally {
+                btnRun.disabled = false;
+                btnRun.innerHTML = '<i class="fa-solid fa-magnifying-glass-chart"></i> Analyze Wave Structure';
+                loadingPanel.style.display = 'none';
+            }
+        }
+    </script>
+
+</body>
+</html>

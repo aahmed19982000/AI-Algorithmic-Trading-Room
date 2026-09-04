@@ -135,6 +135,12 @@ def bot_status():
     return render_template("bot_status.html")
 
 
+@app.route('/elliott-wave')
+def elliott_wave_page():
+    """Serve the standalone Elliott Wave analyzer page (uses Yahoo Finance, no MT5 required)."""
+    return render_template("elliott_wave.html")
+
+
 @app.route('/api/backtest', methods=['POST'])
 def run_backtest_api():
     """
@@ -918,6 +924,78 @@ def trigger_scan():
     t = threading.Thread(target=run_manual_scan)
     t.start()
     return jsonify({"success": True})
+
+
+@app.route('/api/elliott-wave/analyze', methods=['POST'])
+def analyze_elliott_wave_api():
+    """
+    Run the standalone Elliott Wave (Wave 0->1->2) analyzer against Yahoo
+    Finance data and return the detected wave levels plus a rendered chart.
+    Unlike the rest of the dashboard this does NOT require MT5 - it reuses
+    the same pivot/validation math (gann_helper.py) via analyze_elliott_wave_live.py.
+    """
+    data = request.json or {}
+    symbol = data.get("symbol", "EURUSD=X")
+    interval = data.get("interval", "1h")
+    period = data.get("period", "90d")
+    lookback = int(data.get("lookback", 150))
+
+    try:
+        from analyze_elliott_wave_live import (
+            fetch_data, find_pivots, find_latest_setup, plot_chart,
+            calculate_fibonacci_extension, EXTENSION_RATIO, FRESHNESS_BARS, WINDOW
+        )
+
+        df = fetch_data(symbol, interval, period)
+        if df is None or len(df) < 2 * WINDOW + 10:
+            return jsonify({"success": False, "error": f"Not enough data returned for {symbol} ({interval}, {period})."}), 400
+
+        pivots_high, pivots_low = find_pivots(df)
+        setup = find_latest_setup(df, pivots_high, pivots_low, lookback=lookback)
+        all_pivots = sorted(pivots_high + pivots_low, key=lambda p: p[0])
+        recent_pivots = all_pivots[-10:]
+
+        static_dir = os.path.join(os.getcwd(), 'static', 'screenshots')
+        os.makedirs(static_dir, exist_ok=True)
+        safe_symbol = "".join(c for c in symbol if c.isalnum()) or "symbol"
+        filename = f"ew_{safe_symbol}_{interval}_{int(time.time())}.png"
+        filepath = os.path.join(static_dir, filename)
+
+        plot_chart(df, symbol, interval, setup, recent_pivots, filepath)
+
+        last_close = float(df['Close'].iloc[-1])
+        result = {
+            "success": True,
+            "screenshot_url": f"/static/screenshots/{filename}",
+            "current_price": last_close,
+            "setup": None
+        }
+
+        if setup:
+            wave0, wave1, wave2 = setup["val_A"], setup["val_B"], setup["val_C"]
+            tp_target = calculate_fibonacci_extension(wave0, wave1, EXTENSION_RATIO)
+            i_last = len(df) - 1
+            is_fresh = (i_last - setup["idx_C"]) <= FRESHNESS_BARS
+            confirmed = (setup["type"] == "BUY" and last_close > wave2) or \
+                        (setup["type"] == "SELL" and last_close < wave2)
+            result["setup"] = {
+                "type": setup["type"],
+                "wave0": wave0,
+                "wave1": wave1,
+                "wave2": wave2,
+                "retracement_pct": round(setup["ratio"] * 100, 1),
+                "wave3_target": tp_target,
+                "is_fresh": is_fresh,
+                "entry_confirmed": bool(confirmed)
+            }
+
+        return jsonify(result)
+
+    except Exception as e:
+        print(f"[API ELLIOTT WAVE] Error running analysis: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @app.route('/api/chart-data', methods=['GET'])
